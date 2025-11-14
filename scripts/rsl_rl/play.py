@@ -49,7 +49,7 @@ import os
 import time
 import torch
 
-from scripts.rsl_rl.modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
+from modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
 
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.assets import retrieve_file_path
@@ -57,13 +57,13 @@ from isaaclab.utils.dict import print_dict
 from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 from parkour_tasks.extreme_parkour_task.config.go2.agents.parkour_rl_cfg import ParkourRslRlOnPolicyRunnerCfg
 
-from scripts.rsl_rl.exporter import (
+from exporter import (
 export_teacher_policy_as_jit, 
 export_teacher_policy_as_onnx,
 export_deploy_policy_as_jit, 
 export_deploy_policy_as_onnx,
 )
-from scripts.rsl_rl.vecenv_wrapper import ParkourRslRlVecEnvWrapper
+from vecenv_wrapper import ParkourRslRlVecEnvWrapper
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg

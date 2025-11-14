@@ -74,7 +74,7 @@ import os
 import torch
 from datetime import datetime
 
-from scripts.rsl_rl.modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
+from modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -86,7 +86,7 @@ from isaaclab.envs import (
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_pickle, dump_yaml
 from parkour_tasks.extreme_parkour_task.config.go2.agents.parkour_rl_cfg import ParkourRslRlOnPolicyRunnerCfg
-from scripts.rsl_rl.vecenv_wrapper import ParkourRslRlVecEnvWrapper
+from vecenv_wrapper import ParkourRslRlVecEnvWrapper
 # import isaaclab_tasks  # noqa: F401
 import parkour_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path

@@ -5,4 +5,5 @@ parkour_tasks.egg-info/PKG-INFO
 parkour_tasks.egg-info/SOURCES.txt
 parkour_tasks.egg-info/dependency_links.txt
 parkour_tasks.egg-info/not-zip-safe
+parkour_tasks.egg-info/requires.txt
 parkour_tasks.egg-info/top_level.txt
