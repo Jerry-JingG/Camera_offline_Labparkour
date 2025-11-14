@@ -14,7 +14,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 cd "${PROJECT_ROOT}"
 
-SMOKETEST_SCRIPT="parkour_tasks/parkour_tasks/extreme_parkour_task/modules/tests/pipeline_smoketest.py"
+SMOKETEST_SCRIPT="/home/droplet/IsaacLab/Camera_offline_Labparkour/parkour_tasks/parkour_tasks/extreme_parkour_task/modules/tests/pipeline_smoketest.py"
 
 if [[ ! -f "${SMOKETEST_SCRIPT}" ]]; then
     echo "[ERROR] 找不到冒烟测试脚本：${SMOKETEST_SCRIPT}"
