@@ -1,6 +1,7 @@
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 
@@ -67,8 +68,21 @@ class DepthEncoder(nn.Module):
             raise ValueError(
                 f"Expected {self.in_frames} input channels, got {x.shape[1]}."
             )
-        if x.shape[2] % 2 != 0 or x.shape[3] % 2 != 0:
-            raise ValueError("Input height/width must be multiples of 2.")
+
+    def _resize_if_needed(self, x: Tensor) -> Tensor:
+        """Resize depth frames so that height/width are multiples of 2."""
+
+        height, width = x.shape[-2], x.shape[-1]
+        new_height = height + (height % 2)
+        new_width = width + (width % 2)
+        if new_height == height and new_width == width:
+            return x
+        return F.interpolate(
+            x,
+            size=(new_height, new_width),
+            mode="bilinear",
+            align_corners=False,
+        )
 
     def forward(self, x: Tensor) -> Tensor:
         """
@@ -79,6 +93,7 @@ class DepthEncoder(nn.Module):
             Tensor of shape [B, grid_size * grid_size, token_dim].
         """
         self._check_input(x)
+        x = self._resize_if_needed(x)
         h = self.act(self.conv1(x))
         h = self.act(self.conv2(h))
         h = self.act(self.conv3(h))

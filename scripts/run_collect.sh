@@ -8,7 +8,7 @@ TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Play-v0"  # --task：需�
 NUM_ENVS=16                                                    # --num_envs：并行环境数量
 TOTAL_STEPS=5000                                               # --total_steps：总采集步数（一次 step 全部 env 同步计数）
 SHARD_SIZE=1000                                                # --shard_size：每个数据分片包含的 step 数
-OUTPUT_DIR="outputs/datasets/teacher_cam/2025-11-09_23-00-32_49999"                      # --out：数据输出目录
+OUTPUT_DIR="outputs/datasets/teacher_cam/251114"                      # --out：数据输出目录
 DEPTH_ENCODER_CKPT=""                                          # --depth-encoder-checkpoint：学生深度编码器权重（可为空）
 LATENT_INTERVAL=5                                              # --latent-interval：深度 latent 更新间隔
 DATASET_FORMAT="npz"                                           # --dataset-format：数据格式，目前仅支持 npz
@@ -18,7 +18,7 @@ VIDEO_FLAG=false                                               # --video：是�
 VIDEO_LENGTH=500                                               # --video_length：录制的视频长度
 REALTIME_FLAG=false                                            # --real-time：是否按真实时间节奏采集
 USE_PRETRAINED_FLAG=false                                      # --use_pretrained_checkpoint：是否改用官方预训练模型
-CHECKPOINT_PATH="logs/rsl_rl/unitree_go2_parkour/2025-11-09_23-00-32/model_49999.pt"  # --checkpoint：本地 checkpoint 路径
+CHECKPOINT_PATH="logs/rsl_rl/unitree_go2_parkour/251114_ckpt/model_49999.pt"  # --checkpoint：本地 checkpoint 路径
 RESUME_DATASET_FLAG=false                                      # --resume_dataset：若目录存在是否继续追加采集
 
 # ------------------------------- RSL-RL 额外参数 --------------------------------
@@ -37,6 +37,43 @@ PROJECT_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 cd "${PROJECT_ROOT}"
 
 PYTHON_BIN="python"
+
+# Isaac Sim's pip package bundles its own wheels (numpy==1.26.0, etc.) inside
+# `isaacsim/extscache/.../pip_prebundle`. When a newer numpy is installed in the
+# active conda env, importing Isaac extensions may mix both builds and trigger
+# the "numpy.dtype size changed" error seen during collection. Force Python to
+# prioritize the pip_prebundle path so that Isaac's wheels (and their compiled
+# extensions) stay self-consistent.
+ISAACSIM_PIP_PREBUNDLE="$("${PYTHON_BIN}" - <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+spec = importlib.util.find_spec("isaacsim")
+if spec is None or spec.origin is None:
+    sys.exit(0)
+isaacsim_dir = pathlib.Path(spec.origin).resolve().parent
+extscache = isaacsim_dir / "extscache"
+if not extscache.is_dir():
+    sys.exit(0)
+for candidate in sorted(extscache.glob("omni.kit.pip_archive*/pip_prebundle")):
+    if candidate.is_dir():
+        print(candidate)
+        break
+PY
+)"
+if [[ -n "${ISAACSIM_PIP_PREBUNDLE}" ]]; then
+    if [[ ":${PYTHONPATH:-}:" != *":${ISAACSIM_PIP_PREBUNDLE}:"* ]]; then
+        if [[ -n "${PYTHONPATH:-}" ]]; then
+            export PYTHONPATH="${ISAACSIM_PIP_PREBUNDLE}:${PYTHONPATH}"
+        else
+            export PYTHONPATH="${ISAACSIM_PIP_PREBUNDLE}"
+        fi
+    fi
+    echo "[INFO] Using Isaac Sim pip_prebundle: ${ISAACSIM_PIP_PREBUNDLE}"
+else
+    echo "[WARN] Unable to locate Isaac Sim pip_prebundle directory; proceeding without it."
+fi
 
 # ------------------------------- 构建命令行 -------------------------------------
 COLLECT_CMD=("${PYTHON_BIN}" "scripts/rsl_rl/collect.py"

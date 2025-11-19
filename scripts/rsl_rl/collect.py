@@ -13,9 +13,8 @@
    - 同步抓取深度相机原始数据，并可按学生流程实时提取 latent / yaw。
    - 将每 shard（默认为 1000 个环境步）写入 .npz 文件，并输出 meta 与统计信息。
 """
-
 from __future__ import annotations
-
+    
 import argparse
 import json
 import os
@@ -32,6 +31,14 @@ from isaaclab.app import AppLauncher
 
 # 本地导入
 import cli_args  # isort: skip
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+PARKOUR_TASKS_ROOT = os.path.join(PROJECT_ROOT, "parkour_tasks")
+if PARKOUR_TASKS_ROOT not in sys.path:
+    sys.path.insert(0, PARKOUR_TASKS_ROOT)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

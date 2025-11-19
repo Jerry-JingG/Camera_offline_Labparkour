@@ -159,6 +159,11 @@ class MultiModalFusionTransformer(nn.Module):
             ]
         )
         self.final_norm = nn.LayerNorm(token_dim, eps=1e-6)
+        self.fusion_head = nn.Sequential(
+            nn.Linear(2 * token_dim, 2 * token_dim),
+            nn.GELU(),
+            nn.Linear(2 * token_dim, token_dim),
+        )
         self.apply(self._init_weights)
 
     @staticmethod
@@ -211,7 +216,8 @@ class MultiModalFusionTransformer(nn.Module):
         vis_tokens = x[:, 1:, :]
         prop_pooled = prop_tokens.mean(dim=1)
         vis_pooled = vis_tokens.mean(dim=1)
-        all_pooled = x.mean(dim=1)
+        fusion_input = torch.cat([prop_pooled, vis_pooled], dim=-1)
+        all_pooled = self.fusion_head(fusion_input)
 
         return {
             "seq": x,

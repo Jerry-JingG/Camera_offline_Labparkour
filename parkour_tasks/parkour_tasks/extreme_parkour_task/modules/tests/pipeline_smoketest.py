@@ -1,6 +1,6 @@
 import os
 import sys
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -24,6 +24,7 @@ def _ensure_modules_on_path() -> None:
 _ensure_modules_on_path()
 
 from modules.encoders.fusion_transformer import MultiModalFusionTransformer
+from modules.actionheads.joint_action_head import JointPoseActionHead
 from modules.temperal.txl import TransformerXLTemporal
 from modules.tokenizers.depth_encoder import DepthEncoder
 from modules.tokenizers.proprio_encoder import ProprioEncoder
@@ -74,6 +75,7 @@ def run_full_pipeline_smoketest() -> None:
         d_inner=256,
         mem_len=mem_len,
     )
+    action_head = JointPoseActionHead(d_model=token_dim)
 
     proprios = torch.randn(B, S, hist_len * state_dim)
     depths = torch.randn(B, S, in_frames, in_size, in_size)
@@ -119,6 +121,23 @@ def run_full_pipeline_smoketest() -> None:
 
     assert torch.isfinite(y).all(), "NaN or Inf detected in TXL output."
 
+    pi_seq = action_head.forward_sequence(y)
+    assert pi_seq["mean"].shape == (B, S, action_head.log_std.shape[0]), "Action mean has incorrect shape."
+    assert torch.isfinite(pi_seq["mean"]).all(), "Non-finite values in policy mean."
+    assert torch.isfinite(pi_seq["log_std"]).all() and torch.isfinite(pi_seq["std"]).all(), "Invalid std stats."
+    assert (pi_seq["mean"].abs() <= action_head.action_scale + 1e-6).all(), "Actions exceed configured bounds."
+    pi_step = action_head.forward_step(y[:, -1, :])
+    assert torch.allclose(pi_step["mean"], pi_seq["mean"][:, -1, :], atol=1e-6), (
+        "Step/sequence means mismatch for final step."
+    )
+    assert torch.allclose(pi_step["std"], pi_seq["std"][:, -1, :], atol=1e-6), (
+        "Step/sequence std mismatch for final step."
+    )
+    sample = pi_seq["dist"].rsample()
+    assert sample.shape == (B, S, action_head.log_std.shape[0]), "Distribution sample has wrong shape."
+    print("Action head mean sample (batch 0):", pi_seq["mean"][0].detach())
+    print("Action head rsample (batch 0):", sample[0].detach())
+
     x1 = hidden_seq[:, :3, :]
     x2 = hidden_seq[:, 3:, :]
     y1, mems1 = txl(x1, mems=None, causal_mask=True, return_mems=True)
@@ -146,13 +165,15 @@ def run_full_pipeline_smoketest() -> None:
     p_depth = _count_params(depth_enc)
     p_fuse = _count_params(fusion)
     p_txl = _count_params(txl)
-    p_total = p_prop + p_depth + p_fuse + p_txl
+    p_head = _count_params(action_head)
+    p_total = p_prop + p_depth + p_fuse + p_txl + p_head
     print(
         "Params:",
         f"ProprioEncoder={_fmt_int(p_prop)}",
         f"DepthEncoder={_fmt_int(p_depth)}",
         f"FusionTransformer={_fmt_int(p_fuse)}",
         f"TXL={_fmt_int(p_txl)}",
+        f"ActionHead={_fmt_int(p_head)}",
         f"Total={_fmt_int(p_total)}",
     )
 
@@ -189,7 +210,9 @@ def run_gradient_and_perf_smoketest() -> None:
         mem_len=mem_len,
     )
 
-    modules = [prop_enc, depth_enc, fusion, txl]
+    action_head = JointPoseActionHead(d_model=token_dim)
+
+    modules = [prop_enc, depth_enc, fusion, txl, action_head]
     for m in modules:
         m.train()
 
@@ -203,7 +226,7 @@ def run_gradient_and_perf_smoketest() -> None:
         all_params += list(m.parameters())
     opt = torch.optim.SGD(all_params, lr=1e-3, momentum=0.0)
 
-    def fwd_once() -> torch.Tensor:
+    def fwd_once() -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         hidden_chunks = []
         for t in range(S):
             prop_t = proprios[:, t, :]
@@ -214,12 +237,15 @@ def run_gradient_and_perf_smoketest() -> None:
             hidden_chunks.append(fused["all_pooled"].unsqueeze(1))
         hidden_seq = torch.cat(hidden_chunks, dim=1)
         y, _ = txl(hidden_seq, mems=None, causal_mask=True, return_mems=True)
-        return y
+        pi = action_head.forward_sequence(y)
+        assert torch.isfinite(pi["mean"]).all(), "Non-finite mean detected during gradient smoketest."
+        return y, pi
 
     # Backprop/stability: minimize ||y||^2, check grad finiteness and some decrease
     with torch.enable_grad():
-        y0 = fwd_once()
-        loss0 = (y0.pow(2).mean())
+        y0, pi0 = fwd_once()
+        loss0 = (y0.pow(2).mean()) + (pi0["mean"].pow(2).mean())
+        print("Grad smoketest action mean sample (batch 0, step 0):", pi0["mean"][0, 0].detach())
         opt.zero_grad(set_to_none=True)
         loss0.backward()
 
@@ -242,8 +268,10 @@ def run_gradient_and_perf_smoketest() -> None:
 
         # one optimizer step to see loss change
         opt.step()
-        y1 = fwd_once().detach()
-        loss1 = (y1.pow(2).mean()).item()
+        y1, pi1 = fwd_once()
+        y1 = y1.detach()
+        pi1_mean = pi1["mean"].detach()
+        loss1 = (y1.pow(2).mean() + pi1_mean.pow(2).mean()).item()
         print(
             "Grad OK:",
             f"loss0={loss0.item():.6f}",
