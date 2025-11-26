@@ -61,6 +61,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use_pretrained_checkpoint", action="store_true", help="使用官方预训练教师权重。")
     parser.add_argument("--resume_dataset", action="store_true", help="若输出目录存在则追加采集，否则提示是否覆盖。")
 
+    parser.add_argument("--noised_action", action="store_true", default=False, help="教师模型的动作输出是否受到扰动")
+
     cli_args.add_rsl_rl_args(parser)
     AppLauncher.add_app_launcher_args(parser)
     return parser
@@ -390,6 +392,9 @@ def main():  # noqa: C901
     latent_cache = torch.zeros((vec_env.num_envs, 32), device=vec_env.device)
     yaw_cache = torch.zeros((vec_env.num_envs, 2), device=vec_env.device)
 
+    perturb_prob = 0.3  # 30% 的概率使用噪声动作
+    noise_scale = 0.2
+
     while total_iterations < total_steps:
         depth_image = extras["observations"].get("depth_camera")
         if depth_image is None:
@@ -404,6 +409,16 @@ def main():  # noqa: C901
 
         actions = policy(obs_est, hist_encoding=True)
         actions_cpu = actions.detach().cpu().numpy().astype(np.float32)
+
+        # env.step()采用的是扰动后的动作，但采集的action是未加扰动的。采集的数据用于模仿学习，所以我们希望给学生模型用作label的action是没有扰动的
+        if args_cli.noised_action:
+            # 考虑了向量化环境，生成一个随机掩码，决定哪些环境在这个 step 使用噪声
+            use_noise_mask = torch.rand(vec_env.num_envs, device=vec_env.device) < perturb_prob
+            if use_noise_mask.any():
+                noise = torch.randn_like(actions) * noise_scale
+                # 只对被选中的环境添加噪声
+                actions = actions + (noise * use_noise_mask.unsqueeze(-1))
+            actions = torch.clamp(actions, -1.0, 1.0)  # 限制actions到(-1, 1)
 
         if depth_encoder is not None:
             if total_iterations % latent_interval == 0:
