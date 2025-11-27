@@ -418,7 +418,6 @@ def main():  # noqa: C901
                 noise = torch.randn_like(actions) * noise_scale
                 # 只对被选中的环境添加噪声
                 actions = actions + (noise * use_noise_mask.unsqueeze(-1))
-            actions = torch.clamp(actions, -1.0, 1.0)  # 限制actions到(-1, 1)
 
         if depth_encoder is not None:
             if total_iterations % latent_interval == 0:
