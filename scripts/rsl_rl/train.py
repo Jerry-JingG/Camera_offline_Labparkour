@@ -12,6 +12,14 @@ import sys
 
 from isaaclab.app import AppLauncher
 
+# Make sure project-root packages are importable when running via absolute script path.
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+PARKOUR_TASKS_ROOT = os.path.join(PROJECT_ROOT, "parkour_tasks")
+if PARKOUR_TASKS_ROOT not in sys.path:
+    sys.path.insert(0, PARKOUR_TASKS_ROOT)
+
 # local imports
 import cli_args  # isort: skip
 

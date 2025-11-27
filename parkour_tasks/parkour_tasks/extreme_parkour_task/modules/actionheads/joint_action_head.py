@@ -8,17 +8,22 @@ from torch.distributions import Normal
 
 
 class JointPoseActionHead(nn.Module):
-    """Gaussian policy head that outputs bounded joint pose deltas."""
+    """Gaussian policy head that outputs joint pose deltas.
+
+    By default the head is purely linear (no tanh), producing unbounded actions that match
+    the teacher policy outputs stored in ``action_teacher``.
+    """
 
     def __init__(
         self,
         d_model: int,
-        action_dim: int = 12,
+        action_dim: int,
         hidden_dims: Sequence[int] = (256, 256),
-        tanh_output: bool = True,
-        action_scale: float = 0.5,
+        tanh_output: bool = False,
+        action_scale: float = 1.0,
     ) -> None:
         super().__init__()
+        self.action_dim = action_dim
         layers = []
         in_features = d_model
         for hidden_dim in hidden_dims:
@@ -31,6 +36,13 @@ class JointPoseActionHead(nn.Module):
         self.tanh_output = tanh_output
         self.action_scale = action_scale
 
+    def _compute_mean(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the final linear head and optional tanh scaling."""
+        raw_mu = self.mu_head(x)
+        if self.tanh_output:
+            return torch.tanh(raw_mu) * self.action_scale
+        return raw_mu
+
     def forward_step(self, h: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Compute Gaussian policy parameters for single time-step features.
@@ -38,8 +50,7 @@ class JointPoseActionHead(nn.Module):
         Args:
             h: Tensor[B, d_model]
         """
-        raw_mu = self.mu_head(h)
-        mean = torch.tanh(raw_mu) * self.action_scale if self.tanh_output else raw_mu
+        mean = self._compute_mean(h)
         log_std = self.log_std.expand_as(mean)
         std = log_std.exp()
         dist = Normal(mean, std)
@@ -53,9 +64,8 @@ class JointPoseActionHead(nn.Module):
             h_seq: Tensor[B, S, d_model]
         """
         bsz, seq_len, feat_dim = h_seq.shape
-        raw_mu = self.mu_head(h_seq.reshape(bsz * seq_len, feat_dim))
-        mean_flat = torch.tanh(raw_mu) * self.action_scale if self.tanh_output else raw_mu
-        mean = mean_flat.reshape(bsz, seq_len, -1)
+        mean_flat = self._compute_mean(h_seq.reshape(bsz * seq_len, feat_dim))
+        mean = mean_flat.reshape(bsz, seq_len, self.action_dim)
         log_std = self.log_std.expand_as(mean)
         std = log_std.exp()
         dist = Normal(mean, std)

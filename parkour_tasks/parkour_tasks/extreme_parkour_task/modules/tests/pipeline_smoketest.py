@@ -57,6 +57,7 @@ def run_full_pipeline_smoketest() -> None:
     in_frames = 4
     in_size = 64
     token_dim = 128
+    action_dim = 12
     grid_size = 4
     mem_len = 16
 
@@ -75,7 +76,7 @@ def run_full_pipeline_smoketest() -> None:
         d_inner=256,
         mem_len=mem_len,
     )
-    action_head = JointPoseActionHead(d_model=token_dim)
+    action_head = JointPoseActionHead(d_model=token_dim, action_dim=action_dim)
 
     proprios = torch.randn(B, S, hist_len * state_dim)
     depths = torch.randn(B, S, in_frames, in_size, in_size)
@@ -125,7 +126,8 @@ def run_full_pipeline_smoketest() -> None:
     assert pi_seq["mean"].shape == (B, S, action_head.log_std.shape[0]), "Action mean has incorrect shape."
     assert torch.isfinite(pi_seq["mean"]).all(), "Non-finite values in policy mean."
     assert torch.isfinite(pi_seq["log_std"]).all() and torch.isfinite(pi_seq["std"]).all(), "Invalid std stats."
-    assert (pi_seq["mean"].abs() <= action_head.action_scale + 1e-6).all(), "Actions exceed configured bounds."
+    if action_head.tanh_output:
+        assert (pi_seq["mean"].abs() <= action_head.action_scale + 1e-6).all(), "Actions exceed configured bounds."
     pi_step = action_head.forward_step(y[:, -1, :])
     assert torch.allclose(pi_step["mean"], pi_seq["mean"][:, -1, :], atol=1e-6), (
         "Step/sequence means mismatch for final step."
@@ -192,6 +194,7 @@ def run_gradient_and_perf_smoketest() -> None:
     token_dim = 128
     grid_size = 4
     mem_len = 8
+    action_dim = 12
 
     # Build modules
     prop_enc = ProprioEncoder(state_dim=state_dim, hist_len=hist_len, token_dim=token_dim)
@@ -210,7 +213,7 @@ def run_gradient_and_perf_smoketest() -> None:
         mem_len=mem_len,
     )
 
-    action_head = JointPoseActionHead(d_model=token_dim)
+    action_head = JointPoseActionHead(d_model=token_dim, action_dim=action_dim)
 
     modules = [prop_enc, depth_enc, fusion, txl, action_head]
     for m in modules:

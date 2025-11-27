@@ -14,6 +14,7 @@ from typing import Deque, Dict, Iterator, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 from torch import Tensor, nn
+import wandb
 
 # Ensure repo roots are importable
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -273,8 +274,8 @@ class MultiModalStudentPolicy(nn.Module):
             d_model=token_dim,
             action_dim=action_dim,
             hidden_dims=action_head_cfg.get("hidden_dims", (256, 256)),
-            tanh_output=action_head_cfg.get("tanh_output", True),
-            action_scale=action_head_cfg.get("action_scale", 0.5),
+            tanh_output=action_head_cfg.get("tanh_output", False),
+            action_scale=action_head_cfg.get("action_scale", 1.0),
         )
 
     def forward(self, proprio_seq: Tensor, depth_seq: Tensor) -> Tensor:
@@ -324,6 +325,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_sequences_per_epoch", type=int, default=None, help="Optional cap on sequences per epoch.")
     parser.add_argument("--save_dir", type=str, default=None, help="Directory to store checkpoints (defaults to dataset dir).")
     parser.add_argument("--resume", type=str, default=None, help="Optional checkpoint to resume training from.")
+    parser.add_argument(
+        "--use_wandb",
+        action="store_true",
+        help="Enable Weights & Biases logging.",
+    )
     return parser.parse_args()
 
 
@@ -360,8 +366,8 @@ def build_student_from_dataset(
     }
     action_head_cfg = {
         "hidden_dims": (256, 256),
-        "tanh_output": True,
-        "action_scale": 0.75,
+        "tanh_output": False,
+        "action_scale": 1.0,
     }
     model = MultiModalStudentPolicy(
         proprio_dim=proprio_dim,
@@ -432,6 +438,14 @@ def run_training() -> None:
     device = torch.device(args.device)
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+
+    if args.use_wandb:
+        wandb.init(
+            project="robot_camera_offline_student",
+            config=vars(args),
+        )
+        wandb.watch(model, log="all", log_freq=max(1, args.log_interval))
+
     start_epoch = 0
     global_step = 0
     if args.resume:
@@ -463,6 +477,15 @@ def run_training() -> None:
             global_step += 1
             batch.clear()
 
+            if args.use_wandb:
+                wandb.log(
+                    {
+                        "train/loss": loss,
+                        "train/global_step": global_step,
+                        "train/epoch": epoch,
+                    }
+                )
+
             if args.log_interval > 0 and num_updates % args.log_interval == 0:
                 avg_loss = running_loss / max(1, num_updates)
                 print(
@@ -476,6 +499,14 @@ def run_training() -> None:
             num_updates += 1
             global_step += 1
             batch.clear()
+            if args.use_wandb:
+                wandb.log(
+                    {
+                        "train/loss": loss,
+                        "train/global_step": global_step,
+                        "train/epoch": epoch,
+                    }
+                )
 
         epoch_time = time.time() - epoch_start
         avg_loss = running_loss / max(1, num_updates)
@@ -484,8 +515,22 @@ def run_training() -> None:
             f"updates={num_updates} | sequences={sequences_seen} | avg_loss={avg_loss:.6f}"
         )
 
+        if args.use_wandb:
+            wandb.log(
+                {
+                    "train/epoch_avg_loss": avg_loss,
+                    "train/epoch_time": epoch_time,
+                    "train/epoch": epoch,
+                    "train/num_updates": num_updates,
+                    "train/sequences_seen": sequences_seen,
+                }
+            )
+
         ckpt_path = save_dir / f"student_epoch_{epoch:04d}.pt"
         save_checkpoint(ckpt_path, model, optimizer, epoch + 1, global_step, streamer.meta)
+
+    if args.use_wandb:
+        wandb.finish()
 
 
 def train_batch(
