@@ -61,6 +61,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use_pretrained_checkpoint", action="store_true", help="使用官方预训练教师权重。")
     parser.add_argument("--resume_dataset", action="store_true", help="若输出目录存在则追加采集，否则提示是否覆盖。")
 
+    parser.add_argument("--noised_observation", action="store_true", default=False, help="教师模型的观测输入是否受到扰动")
     parser.add_argument("--noised_action", action="store_true", default=False, help="教师模型的动作输出是否受到扰动")
 
     cli_args.add_rsl_rl_args(parser)
@@ -227,6 +228,41 @@ def reset_depth_hidden_states(depth_encoder, done_mask: torch.Tensor):
         return
     if done_mask.any():
         depth_encoder.hidden_states[:, done_mask, :] = 0
+
+
+def generate_proprio_noise(
+    obs_prop: torch.Tensor,
+    noise_scale: float,
+    device: torch.device
+) -> torch.Tensor:
+    """
+    对本体观测 (53维) 施加结构化噪声。
+    通道定义参考 observations.py:
+    0-3: Base Ang Vel (3)
+    3-5: IMU/Projected Gravity (2)
+    5-8: Delta Yaws (3) -> 逻辑值, 不加噪声
+    8-11: Commands (3) -> 指令, 绝对不加
+    11-13: Terrain Bools (2) -> 标志位, 绝对不加
+    13-25: Joint Pos (12)
+    25-37: Joint Vel (12)
+    37-49: Action History (12) -> 内部状态, 通常不加
+    49-53: Contacts (4) -> 足部接触布尔值, 不加
+    """
+    batch_size, dim = obs_prop.shape
+
+    # 定义噪声标准差向量
+    std_vec = torch.zeros(dim, device=device)
+
+    # 设置各物理量的基准噪声强度
+    std_vec[0:3] = 0.5     # Ang Vel (rad/s)
+    std_vec[3:5] = 0.1    # IMU (rad)
+    std_vec[13:25] = 0.05  # Joint Pos (rad)
+    std_vec[25:37] = 1.0   # Joint Vel (rad/s)
+
+    # 生成并叠加噪声
+    noise = torch.randn_like(obs_prop) * std_vec * noise_scale
+
+    return noise
 
 
 def main():  # noqa: C901
@@ -400,6 +436,20 @@ def main():  # noqa: C901
         if depth_image is None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
 
+        # observation扰动逻辑
+        if args_cli.noised_observation:
+            prop_noise = generate_proprio_noise(
+                obs[:, :num_prop],
+                noise_scale=noise_scale,
+                device=vec_env.device
+            )
+            depth_noise = torch.randn_like(depth_image) * noise_scale
+            use_noise_mask = torch.rand(vec_env.num_envs, device=vec_env.device) < perturb_prob
+            if use_noise_mask.any():
+                obs[:, :num_prop] += (prop_noise * use_noise_mask.unsqueeze(-1))
+                depth_image += depth_noise
+                depth_image = torch.clamp(depth_image, min=0.0)  # 深度图通常不能为负
+
         obs_prop = obs[:, :num_prop]
         obs_prop_cpu = obs_prop.detach().cpu().numpy().astype(np.float32)
 
@@ -410,7 +460,7 @@ def main():  # noqa: C901
         actions = policy(obs_est, hist_encoding=True)
         actions_cpu = actions.detach().cpu().numpy().astype(np.float32)
 
-        # env.step()采用的是扰动后的动作，但采集的action是未加扰动的。采集的数据用于模仿学习，所以我们希望给学生模型用作label的action是没有扰动的
+        # 对env施加扰动后的动作从而到达特殊状态，采集的未扰动的action作为label
         if args_cli.noised_action:
             # 考虑了向量化环境，生成一个随机掩码，决定哪些环境在这个 step 使用噪声
             use_noise_mask = torch.rand(vec_env.num_envs, device=vec_env.device) < perturb_prob

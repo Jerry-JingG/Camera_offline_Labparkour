@@ -4,7 +4,8 @@
 set -euo pipefail
 
 # ------------------------------- 核心采集参数 ---------------------------------
-TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Play-v0"  # --task：需要采集的 Gym 任务名
+TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Collect-v0"  # --task：需要采集的 Gym 任务名
+# 如果要使用域随机化， TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Play-v0"
 NUM_ENVS=16                                                    # --num_envs：并行环境数量
 TOTAL_STEPS=5000                                               # --total_steps：总采集步数（一次 step 全部 env 同步计数）
 SHARD_SIZE=1000                                                # --shard_size：每个数据分片包含的 step 数
