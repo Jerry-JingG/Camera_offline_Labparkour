@@ -436,7 +436,7 @@ def main():  # noqa: C901
         if depth_image is None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
 
-        # observation扰动逻辑
+        """ observation扰动逻辑 """
         if args_cli.noised_observation:
             prop_noise = generate_proprio_noise(
                 obs[:, :num_prop],
@@ -447,7 +447,7 @@ def main():  # noqa: C901
             use_noise_mask = torch.rand(vec_env.num_envs, device=vec_env.device) < perturb_prob
             if use_noise_mask.any():
                 obs[:, :num_prop] += (prop_noise * use_noise_mask.unsqueeze(-1))
-                depth_image += depth_noise
+                depth_image += (depth_noise * use_noise_mask.unsqueeze(-1))
                 depth_image = torch.clamp(depth_image, min=0.0)  # 深度图通常不能为负
 
         obs_prop = obs[:, :num_prop]
@@ -460,7 +460,7 @@ def main():  # noqa: C901
         actions = policy(obs_est, hist_encoding=True)
         actions_cpu = actions.detach().cpu().numpy().astype(np.float32)
 
-        # 对env施加扰动后的动作从而到达特殊状态，采集的未扰动的action作为label
+        """ 对env施加扰动后的动作从而到达特殊状态，采集未扰动的action作为label """
         if args_cli.noised_action:
             # 考虑了向量化环境，生成一个随机掩码，决定哪些环境在这个 step 使用噪声
             use_noise_mask = torch.rand(vec_env.num_envs, device=vec_env.device) < perturb_prob

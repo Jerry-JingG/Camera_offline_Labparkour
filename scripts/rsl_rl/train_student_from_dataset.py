@@ -273,8 +273,8 @@ class MultiModalStudentPolicy(nn.Module):
             d_model=token_dim,
             action_dim=action_dim,
             hidden_dims=action_head_cfg.get("hidden_dims", (256, 256)),
-            tanh_output=action_head_cfg.get("tanh_output", True),
-            action_scale=action_head_cfg.get("action_scale", 0.5),
+            tanh_output=action_head_cfg.get("tanh_output", False),  # 应该使用激活函数吗？教师模型tanh_encoder_output = False，会输出>1的action
+            action_scale=action_head_cfg.get("action_scale", 1.0),
         )
 
     def forward(self, proprio_seq: Tensor, depth_seq: Tensor) -> Tensor:
@@ -314,7 +314,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="cuda:0", help="Training device (e.g., cuda:0 or cpu).")
     parser.add_argument("--num_epochs", type=int, default=5, help="Number of passes over the dataset.")
     parser.add_argument("--batch_size", type=int, default=8, help="Number of sequences per optimization step.")
-    parser.add_argument("--sequence_length", type=int, default=16, help="Temporal window size for training samples.")
+    parser.add_argument("--sequence_length", type=int, default=64, help="sequence_length = mem_len 是一般transformerxl网络的默认实现")
     parser.add_argument("--prop_hist_len", type=int, default=3, help="History length (in steps) for proprio tokens.")
     parser.add_argument("--depth_hist_len", type=int, default=4, help="Number of stacked depth frames per sample.")
     parser.add_argument("--learning_rate", type=float, default=3e-4, help="Optimizer learning rate.")
@@ -360,8 +360,8 @@ def build_student_from_dataset(
     }
     action_head_cfg = {
         "hidden_dims": (256, 256),
-        "tanh_output": True,
-        "action_scale": 0.75,
+        "tanh_output": False,   # 教师模型tanh_encoder_output = False，会输出>1的action
+        "action_scale": 1,  # 教师模型没有使用action_sacle
     }
     model = MultiModalStudentPolicy(
         proprio_dim=proprio_dim,
