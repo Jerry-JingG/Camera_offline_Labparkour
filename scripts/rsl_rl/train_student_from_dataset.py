@@ -1,3 +1,15 @@
+"""
+Stateful (Batch-Aligned) Training Script
+
+TransformerXL网络在监督训练时，它的输入流是这样的：
+输入batch0, batch1, batch2...  batch_i是不同环境同一段时间内教师模型与环境交互的切片
+batch_i[j]与batch_i+1[j]必须是同一环境下连续的两片时间内教师模型与环境交互的切片
+这样才可以训练transformerxl网络利用历史状态
+
+因此：
+batch_size必须等于num_envs
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -40,17 +52,8 @@ DepthEncoder = load_symbol(MODULES_ROOT / "tokenizers" / "depth_encoder.py", "De
 ProprioEncoder = load_symbol(MODULES_ROOT / "tokenizers" / "proprio_encoder.py", "ProprioEncoder")
 
 
-@dataclass
-class SequenceSample:
-    """One training sample consisting of a contiguous sequence."""
-
-    proprio: np.ndarray  # [S, hist_len * state_dim]
-    depth: np.ndarray  # [S, depth_hist_len, H, W]
-    actions: np.ndarray  # [S, action_dim]
-
-
 class SequenceAggregator:
-    """Aggregates per-environment steps into temporal windows for training."""
+    """ Stateful Aggregator: 输出的是 [Num_Envs, Seq_Len, Features] 的整块 Batch """
 
     def __init__(
         self,
@@ -58,6 +61,8 @@ class SequenceAggregator:
         prop_hist_len: int,
         depth_hist_len: int,
         sequence_len: int,
+        num_prop: int = 53,
+        depth_shape: Tuple[int, int] = (58, 87)
     ) -> None:
         self.num_envs = num_envs
         self.prop_hist_len = prop_hist_len
@@ -69,75 +74,91 @@ class SequenceAggregator:
         self.depth_histories: List[Deque[np.ndarray]] = [
             deque(maxlen=depth_hist_len) for _ in range(num_envs)
         ]
-        self.sequence_buffers: List[Deque[Dict[str, np.ndarray]]] = [
-            deque(maxlen=sequence_len) for _ in range(num_envs)
-        ]
+        self.prop_dim = num_prop
+        self.depth_shape = depth_shape
+
+        # 1. 初始化历史队列 (Deque) 并预填充 0
+        # 这样从第1步开始就能生成数据，不用等待 warm-up
+        for env_id in range(num_envs):
+            self._reset_env(env_id)
+
+        self.sequence_buffers: List[List[Dict[str, np.ndarray]]] = [[] for _ in range(num_envs)]
 
     def reset(self) -> None:
-        for prop_hist in self.prop_histories:
-            prop_hist.clear()
-        for depth_hist in self.depth_histories:
-            depth_hist.clear()
-        for seq_buf in self.sequence_buffers:
-            seq_buf.clear()
-
-    def push_step(
-        self,
-        obs_prop: np.ndarray,
-        depth_frame: np.ndarray,
-        teacher_actions: np.ndarray,
-        done: np.ndarray,
-    ) -> List[SequenceSample]:
-        """Consume a synchronized environment step and emit ready sequences."""
-
-        ready: List[SequenceSample] = []
         for env_id in range(self.num_envs):
-            prop_hist = self.prop_histories[env_id]
-            depth_hist = self.depth_histories[env_id]
-            seq_buf = self.sequence_buffers[env_id]
+            self._reset_env(env_id)
+            self.sequence_buffers[env_id] = []
 
-            prop_hist.append(obs_prop[env_id].astype(np.float32, copy=False))
-            depth_hist.append(depth_frame[env_id].astype(np.float32, copy=False))
+    def push_step(self, obs_prop, depth_frame, teacher_actions, done):
+        # 这个函数现在必须保证：
+        # 1. 要么返回 None (数据不够)
+        # 2. 要么返回一个完整的 Batch (包含所有 Envs 的数据)
 
-            if len(prop_hist) < self.prop_hist_len or len(depth_hist) < self.depth_hist_len:
-                if done[env_id]:
-                    self._reset_env(env_id)
-                continue
+        batch_ready = False
 
-            prop_stack = np.concatenate(list(prop_hist), axis=0).astype(np.float32, copy=False)
-            depth_stack = np.stack(list(depth_hist), axis=0).astype(np.float32, copy=False)
+        for env_id in range(self.num_envs):
+            self.prop_histories[env_id].append(obs_prop[env_id])
+            self.depth_histories[env_id].append(depth_frame[env_id])
 
-            seq_buf.append(
-                {
-                    "prop": prop_stack,
-                    "depth": depth_stack,
-                    "action": teacher_actions[env_id].astype(np.float32, copy=False),
-                }
-            )
+            prop_stack = np.concatenate(list(self.prop_histories[env_id]), axis=0)
+            depth_stack = np.stack(list(self.depth_histories[env_id]), axis=0)
 
-            if len(seq_buf) == self.sequence_len:
-                ready.append(self._pack_sequence(env_id))
+            self.sequence_buffers[env_id].append({
+                "prop": prop_stack,
+                "depth": depth_stack,
+                "action": teacher_actions[env_id],
+                "done": done[env_id]  # 记录 Done 信号，对 Stateful 训练很重要
+            })
 
+            if len(self.sequence_buffers[env_id]) == self.sequence_len:
+                batch_ready = True
+
+            # 处理 Done (只清空 history，不清空 sequence_buffer，因为我们要保留这一段数据)
             if done[env_id]:
                 self._reset_env(env_id)
 
-        return ready
+        if batch_ready:
+            return self._pack_batch()  # 返回整个 Batch
+        else:
+            return None
 
-    def _pack_sequence(self, env_id: int) -> SequenceSample:
-        seq = list(self.sequence_buffers[env_id])
-        proprio = np.stack([step["prop"] for step in seq], axis=0)
-        depth = np.stack([step["depth"] for step in seq], axis=0)
-        actions = np.stack([step["action"] for step in seq], axis=0)
-        return SequenceSample(proprio=proprio, depth=depth, actions=actions)
+    def _pack_batch(self):
+        """
+        将 List[List[Dict]] 转换为 Numpy Batch
+        Output Shape: [Num_Envs, Seq_Len, Features]
+        """
+        prop_batch, depth_batch, action_batch, done_batch = [], [], [], []
+
+        for env_id in range(self.num_envs):
+            seq = self.sequence_buffers[env_id]
+            # Stack time dimension
+            prop_batch.append(np.stack([s["prop"] for s in seq]))
+            depth_batch.append(np.stack([s["depth"] for s in seq]))
+            action_batch.append(np.stack([s["action"] for s in seq]))
+            done_batch.append(np.stack([s["done"] for s in seq]))
+
+            # 关键：清空 buffer，实现非重叠
+            self.sequence_buffers[env_id] = []
+
+        return {
+            "proprio": np.stack(prop_batch),  # [16, 64, 53*3]
+            "depth": np.stack(depth_batch),  # [16, 64, 4, H, W]
+            "actions": np.stack(action_batch),
+            "dones": np.stack(done_batch)    # [16, 64]
+        }
 
     def _reset_env(self, env_id: int) -> None:
         self.prop_histories[env_id].clear()
         self.depth_histories[env_id].clear()
-        self.sequence_buffers[env_id].clear()
+        # self.sequence_buffers[env_id].clear()
+        for _ in range(self.prop_hist_len):
+            self.prop_histories[env_id].append(np.zeros(self.prop_dim, dtype=np.float32))
+        for _ in range(self.depth_hist_len):
+            self.depth_histories[env_id].append(np.zeros(self.depth_shape, dtype=np.float32))
 
 
 class TeacherDatasetStreamer:
-    """Streams teacher trajectories and exposes fused temporal samples."""
+    """Streams teacher trajectories and exposes Batch-aligned samples."""
 
     def __init__(
         self,
@@ -174,11 +195,10 @@ class TeacherDatasetStreamer:
         with meta_path.open("r", encoding="utf-8") as meta_file:
             return json.load(meta_file)
 
-    def iter_sequences(self, max_sequences: Optional[int] = None) -> Iterator[SequenceSample]:
-        """Yield SequenceSample entries for one epoch."""
-
+    def iter_batches(self, max_sequences: Optional[int] = None) -> Iterator[Dict[str, np.ndarray]]:
+        """Yields full batches of shape [Num_Envs, Seq_Len, ...]"""
         self.aggregator.reset()
-        yielded = 0
+        batches_yielded = 0
 
         for shard_path in self.shards:
             with np.load(shard_path, allow_pickle=False) as shard:
@@ -190,16 +210,19 @@ class TeacherDatasetStreamer:
 
                 for step_idx in range(num_steps):
                     depth_frame = self._convert_depth(depth[step_idx])
-                    ready = self.aggregator.push_step(
+                    # Push step and check if a batch is ready
+                    batch_data = self.aggregator.push_step(
                         obs_prop=obs_prop[step_idx],
                         depth_frame=depth_frame,
                         teacher_actions=actions[step_idx],
                         done=dones[step_idx].reshape(-1),
                     )
-                    for sample in ready:
-                        yield sample
-                        yielded += 1
-                        if max_sequences is not None and yielded >= max_sequences:
+
+                    if batch_data is not None:
+                        yield batch_data
+                        # 注意：这里的 max_sequences 语义略有变化，变成 max_batches
+                        batches_yielded += 1
+                        if max_sequences is not None and batches_yielded >= max_sequences:
                             self.aggregator.reset()
                             return
 
@@ -311,9 +334,10 @@ def parse_args() -> argparse.Namespace:
         description="Train new transformer student policy from collected teacher datasets."
     )
     parser.add_argument("--dataset", type=str, required=True, help="Path to collect.py output directory.")
+    parser.add_argument("--student_checkpoint", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda:0", help="Training device (e.g., cuda:0 or cpu).")
     parser.add_argument("--num_epochs", type=int, default=5, help="Number of passes over the dataset.")
-    parser.add_argument("--batch_size", type=int, default=8, help="Number of sequences per optimization step.")
+    # parser.add_argument("--batch_size", type=int, default=8)  batch_size需要等于num_envs!!!
     parser.add_argument("--sequence_length", type=int, default=64, help="sequence_length = mem_len 是一般transformerxl网络的默认实现")
     parser.add_argument("--prop_hist_len", type=int, default=3, help="History length (in steps) for proprio tokens.")
     parser.add_argument("--depth_hist_len", type=int, default=4, help="Number of stacked depth frames per sample.")
@@ -323,7 +347,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log_interval", type=int, default=100, help="Steps between logging training metrics.")
     parser.add_argument("--max_sequences_per_epoch", type=int, default=None, help="Optional cap on sequences per epoch.")
     parser.add_argument("--save_dir", type=str, default=None, help="Directory to store checkpoints (defaults to dataset dir).")
-    parser.add_argument("--resume", type=str, default=None, help="Optional checkpoint to resume training from.")
+    # parser.add_argument("--resume", type=str, default=None)  已被student_checkpoint代替
     return parser.parse_args()
 
 
@@ -434,8 +458,8 @@ def run_training() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     start_epoch = 0
     global_step = 0
-    if args.resume:
-        resume_path = Path(args.resume).expanduser().resolve()
+    if args.student_checkpoint:
+        resume_path = Path(args.student_checkpoint).expanduser().resolve()
         start_epoch, global_step = load_checkpoint(resume_path, model, optimizer)
 
     print(
@@ -446,43 +470,24 @@ def run_training() -> None:
     for epoch in range(start_epoch, args.num_epochs):
         epoch_start = time.time()
         model.train()
-        batch: List[SequenceSample] = []
         running_loss = 0.0
         num_updates = 0
-        sequences_seen = 0
 
-        for sample in streamer.iter_sequences(max_sequences=args.max_sequences_per_epoch):
-            batch.append(sample)
-            sequences_seen += 1
-            if len(batch) < args.batch_size:
-                continue
+        # 直接迭代 Batch (无需再组装 samples)
+        for batch_data in streamer.iter_batches(max_sequences=args.max_sequences_per_epoch):
+            loss = train_batch(model, optimizer, batch_data, device, args.grad_clip, streamer)
 
-            loss = train_batch(model, optimizer, batch, device, args.grad_clip)
             running_loss += loss
             num_updates += 1
             global_step += 1
-            batch.clear()
 
             if args.log_interval > 0 and num_updates % args.log_interval == 0:
                 avg_loss = running_loss / max(1, num_updates)
-                print(
-                    f"[epoch {epoch}] step {global_step} | "
-                    f"updates={num_updates} | avg_loss={avg_loss:.6f} | sequences={sequences_seen}"
-                )
-
-        if batch:
-            loss = train_batch(model, optimizer, batch, device, args.grad_clip)
-            running_loss += loss
-            num_updates += 1
-            global_step += 1
-            batch.clear()
+                print(f"[epoch {epoch}] step {global_step} | updates={num_updates} | avg_loss={avg_loss:.6f}")
 
         epoch_time = time.time() - epoch_start
         avg_loss = running_loss / max(1, num_updates)
-        print(
-            f"[epoch {epoch}] completed in {epoch_time:.1f}s | "
-            f"updates={num_updates} | sequences={sequences_seen} | avg_loss={avg_loss:.6f}"
-        )
+        print(f"[epoch {epoch}] completed in {epoch_time:.1f}s | avg_loss={avg_loss:.6f}")
 
         ckpt_path = save_dir / f"student_epoch_{epoch:04d}.pt"
         save_checkpoint(ckpt_path, model, optimizer, epoch + 1, global_step, streamer.meta)
@@ -491,15 +496,13 @@ def run_training() -> None:
 def train_batch(
     model: MultiModalStudentPolicy,
     optimizer: torch.optim.Optimizer,
-    batch_samples: Sequence[SequenceSample],
+    batch_data: Dict[str, np.ndarray],
     device: torch.device,
     grad_clip: float,
 ) -> float:
-    proprio = torch.from_numpy(np.stack([sample.proprio for sample in batch_samples], axis=0)).to(device)
-    depth = torch.from_numpy(np.stack([sample.depth for sample in batch_samples], axis=0)).to(device)
-    teacher_actions = torch.from_numpy(
-        np.stack([sample.actions for sample in batch_samples], axis=0)
-    ).to(device)
+    proprio = torch.from_numpy(batch_data["proprio"]).to(device)
+    depth = torch.from_numpy(batch_data["depth"]).to(device)
+    teacher_actions = torch.from_numpy(batch_data["actions"]).to(device)
 
     predictions = model(proprio, depth)
     loss = torch.nn.functional.mse_loss(predictions, teacher_actions)

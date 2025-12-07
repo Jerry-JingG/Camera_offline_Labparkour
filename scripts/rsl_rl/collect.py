@@ -48,7 +48,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task", type=str, required=True, help="需要采集的 Isaac 任务名。")
     parser.add_argument("--num_envs", type=int, default=16, help="并行环境数量。")
     parser.add_argument("--total_steps", type=int, required=True, help="需要采集的环境步数（单次 step 全部 env 同步计数）。")
-    parser.add_argument("--shard_size", type=int, default=1000, help="每个数据分片包含的 step 数量。")
+    parser.add_argument("--shard_size", type=int, default=1024, help="每个数据分片包含的 step 数量。")
     parser.add_argument("--out", type=str, required=True, help="数据集输出目录。")
     parser.add_argument("--depth-encoder-checkpoint", type=str, default=None, help="学生深度编码器权重路径（可选）。")
     parser.add_argument("--latent-interval", type=int, default=5, help="深度编码器更新 latent 的步间隔。")
@@ -447,7 +447,8 @@ def main():  # noqa: C901
             use_noise_mask = torch.rand(vec_env.num_envs, device=vec_env.device) < perturb_prob
             if use_noise_mask.any():
                 obs[:, :num_prop] += (prop_noise * use_noise_mask.unsqueeze(-1))
-                depth_image += (depth_noise * use_noise_mask.unsqueeze(-1))
+                mask_expanded = use_noise_mask.view(vec_env.num_envs, 1, 1)
+                depth_image += (depth_noise * mask_expanded)
                 depth_image = torch.clamp(depth_image, min=0.0)  # 深度图通常不能为负
 
         obs_prop = obs[:, :num_prop]
