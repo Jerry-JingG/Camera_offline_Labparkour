@@ -13,8 +13,19 @@
    - 同步抓取深度相机原始数据，并可按学生流程实时提取 latent / yaw。
    - 将每 shard（默认为 1000 个环境步）写入 .npz 文件，并输出 meta 与统计信息。
 """
+
+"""
+collect.py 收集的数据格式是：
+env_0: x0, x1, ...              ....              xT
+env_1: x0, x1, ...              ....              xT
+...
+env_i:  x0, ..., x_done_t, x_new_0, x_new_1, ..., xT   ← reset 后继续
+...
+env_n: x0, x1, ...              ....              xT
+"""
+
 from __future__ import annotations
-    
+
 import argparse
 import json
 import os

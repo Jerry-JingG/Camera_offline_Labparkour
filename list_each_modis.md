@@ -13,7 +13,7 @@ commit4:
 如果需要使用域随机化，修改run_collect.sh中的TASK_ID。已在__init__.py中注册COLLECT环境
 
 commit5&6:
-大幅修改了train_student_from_dataset.py文件 
+大幅修改了train_student_from_dataset.py文件
 旧版代码batch_size!=num_envs并且切片得到的sequence_0, sequence_1, sequence_2是重叠的
 
 TransformerXL网络在监督训练时，它的输入流是这样的：
@@ -23,3 +23,12 @@ batch_i[j]与batch_i+1[j]必须是同一环境下连续的两片时间内教师�
 
 因此：
 batch_size必须等于num_envs，并且sequence_0, sequence_1, sequence_2应该相接！
+
+commit7:
+train_student_dagger v1： 提示，在使用dagger训练之前，最好先改好txl的inference。不然会跑得很慢
+
+train_student_dagger需要学生策略一步一步与环境交互：模型不知道下一步的观测是什么，所以只能一步一步往外蹦action
+与train dataset不同，dataset预先获得了完整的轨迹，所以可以让transformer输入一整个sequence，并行地，一次输出一个sequence的action
+
+transformerxl的inference与一般的transformer不同，txl运用历史状态，在inference时只对最新输入的xt计算QKV，所以推理很快
+一般的transformer需要对累积的 x{t-mem_len}.....xt 都计算QKV

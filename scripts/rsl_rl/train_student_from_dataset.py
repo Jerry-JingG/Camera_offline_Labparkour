@@ -7,7 +7,7 @@ batch_i[j]与batch_i+1[j]必须是同一环境下连续的两片时间内教师�
 这样才可以训练transformerxl网络利用历史状态
 
 因此：
-batch_size必须等于num_envs
+batch_size必须等于num_envs，并且batch0和batch1之间不能有时间片重叠
 """
 
 from __future__ import annotations
@@ -113,7 +113,7 @@ class SequenceAggregator:
             if len(self.sequence_buffers[env_id]) == self.sequence_len:
                 batch_ready = True
 
-            # 处理 Done (只清空 history，不清空 sequence_buffer，因为我们要保留这一段数据)
+            # 处理 Done (只清空 history，不清空 sequence_buffer, 否则输出维度会不匹配(输出的是一整个batch))
             if done[env_id]:
                 self._reset_env(env_id)
 
@@ -336,7 +336,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=str, required=True, help="Path to collect.py output directory.")
     parser.add_argument("--student_checkpoint", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda:0", help="Training device (e.g., cuda:0 or cpu).")
-    parser.add_argument("--num_epochs", type=int, default=5, help="Number of passes over the dataset.")
+    parser.add_argument("--num_epochs", type=int, default=100, help="Number of passes over the dataset.")
     # parser.add_argument("--batch_size", type=int, default=8)  batch_size需要等于num_envs!!!
     parser.add_argument("--sequence_length", type=int, default=64, help="sequence_length = mem_len 是一般transformerxl网络的默认实现")
     parser.add_argument("--prop_hist_len", type=int, default=3, help="History length (in steps) for proprio tokens.")
