@@ -45,9 +45,11 @@ ProprioEncoder = load_symbol(MODULES_ROOT / "tokenizers" / "proprio_encoder.py",
 class SequenceSample:
     """One training sample consisting of a contiguous sequence."""
 
+    env_id: int
     proprio: np.ndarray  # [S, hist_len * state_dim]
     depth: np.ndarray  # [S, depth_hist_len, H, W]
     actions: np.ndarray  # [S, action_dim]
+    dones: np.ndarray  # [S]
 
 
 class SequenceAggregator:
@@ -113,6 +115,7 @@ class SequenceAggregator:
                     "prop": prop_stack,
                     "depth": depth_stack,
                     "action": teacher_actions[env_id].astype(np.float32, copy=False),
+                    "done": bool(done[env_id]),
                 }
             )
 
@@ -129,7 +132,8 @@ class SequenceAggregator:
         proprio = np.stack([step["prop"] for step in seq], axis=0)
         depth = np.stack([step["depth"] for step in seq], axis=0)
         actions = np.stack([step["action"] for step in seq], axis=0)
-        return SequenceSample(proprio=proprio, depth=depth, actions=actions)
+        dones = np.array([step["done"] for step in seq], dtype=bool)
+        return SequenceSample(env_id=env_id, proprio=proprio, depth=depth, actions=actions, dones=dones)
 
     def _reset_env(self, env_id: int) -> None:
         self.prop_histories[env_id].clear()
@@ -277,15 +281,25 @@ class MultiModalStudentPolicy(nn.Module):
             tanh_output=action_head_cfg.get("tanh_output", False),
             action_scale=action_head_cfg.get("action_scale", 1.0),
         )
+        # Filled in by training loop: one memory list per env_id.
+        self._env_mems: List[List[Tensor]] = []
 
-    def forward(self, proprio_seq: Tensor, depth_seq: Tensor) -> Tensor:
+    def forward(
+        self,
+        proprio_seq: Tensor,
+        depth_seq: Tensor,
+        mems: Optional[List[Optional[Tensor]]] = None,
+        return_mems: bool = False,
+    ):
         """
         Args:
             proprio_seq: Tensor[B, S, prop_hist_len * proprio_dim]
             depth_seq: Tensor[B, S, depth_hist_len, H, W]
+            mems: Optional TXL memories (list of [B, M, d]).
+            return_mems: Whether to return updated memories.
 
         Returns:
-            Predicted action means of shape [B, S, action_dim]
+            Predicted action means of shape [B, S, action_dim] and optionally new mems.
         """
 
         batch_size, seq_len, feat_dim = proprio_seq.shape
@@ -297,13 +311,15 @@ class MultiModalStudentPolicy(nn.Module):
         )  # [B*S, T, C]
         fused = self.fusion_transformer(prop_encoded, depth_encoded)
         fused_seq = fused["all_pooled"].reshape(batch_size, seq_len, -1)
-        temporal_out, _ = self.temporal_model(
+        temporal_out, new_mems = self.temporal_model(
             fused_seq,
-            mems=None,
+            mems=mems,
             causal_mask=True,
-            return_mems=False,
+            return_mems=True,
         )
         actions = self.action_head.forward_sequence(temporal_out)["mean"]
+        if return_mems:
+            return actions, new_mems
         return actions
 
 
@@ -325,6 +341,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_sequences_per_epoch", type=int, default=None, help="Optional cap on sequences per epoch.")
     parser.add_argument("--save_dir", type=str, default=None, help="Directory to store checkpoints (defaults to dataset dir).")
     parser.add_argument("--resume", type=str, default=None, help="Optional checkpoint to resume training from.")
+    parser.add_argument("--wandb_project", type=str, default="robot_camera_offline_student", help="Weights & Biases project name.")
+    parser.add_argument("--wandb_entity", type=str, default=None, help="Optional W&B entity.")
+    parser.add_argument("--wandb_run_name", type=str, default=None, help="Optional W&B run name.")
+    parser.add_argument("--wandb_tags", type=str, nargs="*", default=None, help="Optional list of W&B tags.")
+    parser.add_argument(
+        "--wandb_mode",
+        type=str,
+        default="online",
+        choices=["online", "offline"],
+        help="W&B logging mode (online or offline).",
+    )
     parser.add_argument(
         "--use_wandb",
         action="store_true",
@@ -439,11 +466,34 @@ def run_training() -> None:
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
+    def reset_all_env_mems() -> None:
+        """Initialize TXL memories for each env_id (batch dimension = 1)."""
+        model._env_mems = [model.temporal_model.reset_mems(1) for _ in range(streamer.num_envs)]  # type: ignore[attr-defined]
+
+    def get_current_lr(opt: torch.optim.Optimizer) -> float:
+        for group in opt.param_groups:
+            if "lr" in group:
+                return float(group["lr"])
+        return 0.0
+
     if args.use_wandb:
+        wandb_config = {
+            **vars(args),
+            "dataset_dir": str(dataset_dir),
+            "num_envs": streamer.num_envs,
+            "num_shards": len(streamer.shards),
+            "camera_resolution": streamer.camera_resolution,
+        }
         wandb.init(
-            project="robot_camera_offline_student",
-            config=vars(args),
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
+            tags=args.wandb_tags,
+            mode=args.wandb_mode,
+            config=wandb_config,
         )
+        wandb.define_metric("train/global_step")
+        wandb.define_metric("train/*", step_metric="train/global_step")
         wandb.watch(model, log="all", log_freq=max(1, args.log_interval))
 
     start_epoch = 0
@@ -460,6 +510,7 @@ def run_training() -> None:
     for epoch in range(start_epoch, args.num_epochs):
         epoch_start = time.time()
         model.train()
+        reset_all_env_mems()
         batch: List[SequenceSample] = []
         running_loss = 0.0
         num_updates = 0
@@ -471,7 +522,7 @@ def run_training() -> None:
             if len(batch) < args.batch_size:
                 continue
 
-            loss = train_batch(model, optimizer, batch, device, args.grad_clip)
+            loss, grad_norm = train_batch(model, optimizer, batch, device, args.grad_clip)
             running_loss += loss
             num_updates += 1
             global_step += 1
@@ -483,6 +534,8 @@ def run_training() -> None:
                         "train/loss": loss,
                         "train/global_step": global_step,
                         "train/epoch": epoch,
+                        "train/grad_norm": grad_norm,
+                        "train/lr": get_current_lr(optimizer),
                     }
                 )
 
@@ -494,7 +547,7 @@ def run_training() -> None:
                 )
 
         if batch:
-            loss = train_batch(model, optimizer, batch, device, args.grad_clip)
+            loss, grad_norm = train_batch(model, optimizer, batch, device, args.grad_clip)
             running_loss += loss
             num_updates += 1
             global_step += 1
@@ -505,11 +558,14 @@ def run_training() -> None:
                         "train/loss": loss,
                         "train/global_step": global_step,
                         "train/epoch": epoch,
+                        "train/grad_norm": grad_norm,
+                        "train/lr": get_current_lr(optimizer),
                     }
                 )
 
         epoch_time = time.time() - epoch_start
         avg_loss = running_loss / max(1, num_updates)
+        seqs_per_sec = sequences_seen / max(1e-8, epoch_time)
         print(
             f"[epoch {epoch}] completed in {epoch_time:.1f}s | "
             f"updates={num_updates} | sequences={sequences_seen} | avg_loss={avg_loss:.6f}"
@@ -523,6 +579,7 @@ def run_training() -> None:
                     "train/epoch": epoch,
                     "train/num_updates": num_updates,
                     "train/sequences_seen": sequences_seen,
+                    "train/sequences_per_sec": seqs_per_sec,
                 }
             )
 
@@ -539,21 +596,53 @@ def train_batch(
     batch_samples: Sequence[SequenceSample],
     device: torch.device,
     grad_clip: float,
-) -> float:
+) -> Tuple[float, Optional[float]]:
     proprio = torch.from_numpy(np.stack([sample.proprio for sample in batch_samples], axis=0)).to(device)
     depth = torch.from_numpy(np.stack([sample.depth for sample in batch_samples], axis=0)).to(device)
     teacher_actions = torch.from_numpy(
         np.stack([sample.actions for sample in batch_samples], axis=0)
     ).to(device)
 
-    predictions = model(proprio, depth)
+    # Assemble per-layer memories for this mini-batch (B may mix envs).
+    num_layers = len(model.temporal_model.layers)
+    mems_in: List[torch.Tensor] = []
+    for layer_idx in range(num_layers):
+        mems_layer = [model._env_mems[s.env_id][layer_idx] for s in batch_samples]  # type: ignore[attr-defined]
+        # 对齐长度：不同 env 的 mem 可能是空（0 长度）或已达 mem_len，需要左侧零填充到同一长度再 concat
+        target_len = max(m.size(1) for m in mems_layer)
+        if target_len == 0:
+            mems_in.append(torch.cat(mems_layer, dim=0))
+        else:
+            padded: List[torch.Tensor] = []
+            for m in mems_layer:
+                if m.size(1) == target_len:
+                    padded.append(m)
+                else:
+                    pad_len = target_len - m.size(1)
+                    pad = torch.zeros(m.size(0), pad_len, m.size(2), device=m.device, dtype=m.dtype)
+                    padded.append(torch.cat([pad, m], dim=1))
+            mems_in.append(torch.cat(padded, dim=0))
+
+    predictions, new_mems = model(proprio, depth, mems=mems_in, return_mems=True)
     loss = torch.nn.functional.mse_loss(predictions, teacher_actions)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
+    grad_norm: Optional[float] = None
     if grad_clip > 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip))
     optimizer.step()
-    return float(loss.item())
+
+    # Update per-env memories (detach to break graph) and reset on done.
+    with torch.no_grad():
+        for batch_idx, sample in enumerate(batch_samples):
+            env_id = sample.env_id
+            if sample.dones.any():
+                model._env_mems[env_id] = model.temporal_model.reset_mems(1)
+            else:
+                updated = [mem[batch_idx : batch_idx + 1].detach() for mem in new_mems]  # type: ignore[arg-type]
+                model._env_mems[env_id] = updated
+
+    return float(loss.item()), grad_norm
 
 
 if __name__ == "__main__":

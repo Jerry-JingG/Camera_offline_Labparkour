@@ -31,6 +31,8 @@ _spec = importlib.util.spec_from_file_location("train_student_from_dataset", TRA
 if _spec is None or _spec.loader is None:
     raise ImportError(f"Unable to load MultiModalStudentPolicy from {TRAIN_STUDENT_PATH}")
 _module = importlib.util.module_from_spec(_spec)
+# Register into sys.modules before execution so dataclasses can resolve module references.
+sys.modules[_spec.name] = _module
 _spec.loader.exec_module(_module)
 MultiModalStudentPolicy = _module.MultiModalStudentPolicy
 
@@ -138,11 +140,14 @@ class StudentOnlineRunner:
         self.camera_resolution = camera_resolution
         self.device = device
         self.sequence_length = sequence_length
+        self.num_layers = len(self.model.temporal_model.layers)
 
         self.prop_histories: List[deque] = [deque(maxlen=prop_hist_len) for _ in range(num_envs)]
         self.depth_histories: List[deque] = [deque(maxlen=depth_hist_len) for _ in range(num_envs)]
         self.seq_prop_histories: List[deque] = [deque(maxlen=sequence_length) for _ in range(num_envs)]
         self.seq_depth_histories: List[deque] = [deque(maxlen=sequence_length) for _ in range(num_envs)]
+        # TXL memory per env (list of tensors per layer)
+        self.mems: List[List[torch.Tensor]] = []
 
     def reset(self) -> None:
         """Clear histories for all environments."""
@@ -154,6 +159,8 @@ class StudentOnlineRunner:
             hist.clear()
         for hist in self.seq_depth_histories:
             hist.clear()
+        # reset mems for all envs
+        self.mems = [self.model.temporal_model.reset_mems(1) for _ in range(self.num_envs)]
 
     def reset_done(self, done_mask: torch.Tensor) -> None:
         """Clear histories for environments where done_mask is True."""
@@ -163,12 +170,13 @@ class StudentOnlineRunner:
                 self.depth_histories[env_id].clear()
                 self.seq_prop_histories[env_id].clear()
                 self.seq_depth_histories[env_id].clear()
+                self.mems[env_id] = self.model.temporal_model.reset_mems(1)
 
     def num_ready_envs(self) -> int:
-        """Return number of envs with full history buffers."""
+        """Return number of envs whose短历史已填满（可以推理动作）。"""
         ready = 0
-        for prop_seq_hist, depth_seq_hist in zip(self.seq_prop_histories, self.seq_depth_histories):
-            if len(prop_seq_hist) == self.sequence_length and len(depth_seq_hist) == self.sequence_length:
+        for prop_hist, depth_hist in zip(self.prop_histories, self.depth_histories):
+            if len(prop_hist) == self.prop_hist_len and len(depth_hist) == self.depth_hist_len:
                 ready += 1
         return ready
 
@@ -199,29 +207,57 @@ class StudentOnlineRunner:
                 depth_stack = torch.stack(list(self.depth_histories[env_id]), dim=0)  # [depth_hist_len, H, W]
                 self.seq_prop_histories[env_id].append(prop_stack)
                 self.seq_depth_histories[env_id].append(depth_stack)
-                if (
-                    len(self.seq_prop_histories[env_id]) == self.sequence_length
-                    and len(self.seq_depth_histories[env_id]) == self.sequence_length
-                ):
-                    ready_indices.append(env_id)
+                # 只要短历史准备好就可以推理；序列长度不足 sequence_length 时直接用当前可用长度，mems 负责长时信息。
+                ready_indices.append(env_id)
 
         actions = torch.zeros(self.num_envs, self.model.action_head.action_dim, device=self.device)
 
         if ready_indices:
             prop_tensors: List[torch.Tensor] = []
             depth_tensors: List[torch.Tensor] = []
+            mems_ready: List[torch.Tensor] = []
+            seq_lengths = [len(self.seq_prop_histories[env_id]) for env_id in ready_indices]
+            max_seq_len = max(seq_lengths)
             for env_id in ready_indices:
-                prop_seq = torch.stack(list(self.seq_prop_histories[env_id]), dim=0)  # [S, prop_hist_len * proprio_dim]
-                depth_seq = torch.stack(list(self.seq_depth_histories[env_id]), dim=0)  # [S, depth_hist_len, H, W]
+                # 左侧零填充到当前 batch 中的最大序列长度，以便 cat 不出错。
+                prop_seq_list = list(self.seq_prop_histories[env_id])
+                depth_seq_list = list(self.seq_depth_histories[env_id])
+                cur_len = len(prop_seq_list)
+                if cur_len < max_seq_len:
+                    pad_len = max_seq_len - cur_len
+                    prop_pad = [torch.zeros_like(prop_seq_list[0]) for _ in range(pad_len)]
+                    depth_pad = [torch.zeros_like(depth_seq_list[0]) for _ in range(pad_len)]
+                    prop_seq_list = prop_pad + prop_seq_list
+                    depth_seq_list = depth_pad + depth_seq_list
+                prop_seq = torch.stack(prop_seq_list, dim=0)  # [S, prop_hist_len * proprio_dim]
+                depth_seq = torch.stack(depth_seq_list, dim=0)  # [S, depth_hist_len, H, W]
                 prop_tensors.append(prop_seq.unsqueeze(0))  # [1, S, prop_hist_len * proprio_dim]
                 depth_tensors.append(depth_seq.unsqueeze(0))  # [1, S, depth_hist_len, H, W]
             proprios_ready = torch.cat(prop_tensors, dim=0)  # [N_ready, S, prop_hist_len * proprio_dim]
             depths_ready = torch.cat(depth_tensors, dim=0)  # [N_ready, S, depth_hist_len, H, W]
+            # gather and pad mems across envs for each layer
+            for layer_idx in range(self.num_layers):
+                layer_mems: List[torch.Tensor] = [self.mems[env_id][layer_idx] for env_id in ready_indices]
+                target_len = max(m.size(1) for m in layer_mems)
+                if target_len == 0:
+                    mems_ready.append(torch.cat(layer_mems, dim=0))
+                else:
+                    padded: List[torch.Tensor] = []
+                    for m in layer_mems:
+                        if m.size(1) == target_len:
+                            padded.append(m)
+                        else:
+                            pad_len = target_len - m.size(1)
+                            pad = torch.zeros(m.size(0), pad_len, m.size(2), device=m.device, dtype=m.dtype)
+                            padded.append(torch.cat([pad, m], dim=1))
+                    mems_ready.append(torch.cat(padded, dim=0))
             with torch.no_grad():
-                pred_ready = self.model(proprios_ready, depths_ready)  # [N_ready, S, action_dim]
+                pred_ready, new_mems = self.model(proprios_ready, depths_ready, mems=mems_ready, return_mems=True)  # [N_ready, S, action_dim]
             actions_ready = pred_ready[:, -1, :]  # take action from last timestep of the sequence
             for idx, env_id in enumerate(ready_indices):
                 actions[env_id] = actions_ready[idx]
+                # update mems for this env (detach to avoid graph accumulation)
+                self.mems[env_id] = [mem[idx : idx + 1].detach() for mem in new_mems]  # type: ignore[arg-type]
 
         return actions
 
@@ -337,6 +373,12 @@ def main() -> None:
         depth_t = depth_image.to(device)
 
         actions = runner.act(obs_prop_t, depth_t)
+        if step % 50 == 0:
+            try:
+                mean_norm = actions.norm(dim=-1).mean().item()
+            except Exception:
+                mean_norm = float("nan")
+            print(f"[student_play] step={step} mean_action_norm={mean_norm:.6f}")
         obs_next, rews, dones, extras = vec_env.step(actions)
         done_mask = dones.squeeze(-1).bool()
         if done_mask.any():

@@ -8,13 +8,12 @@ TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Play-v0"  # --task：需�
 NUM_ENVS=16                                                    # --num_envs：并行环境数量
 TOTAL_STEPS=5000                                               # --total_steps：总采集步数（一次 step 全部 env 同步计数）
 SHARD_SIZE=1000                                                # --shard_size：每个数据分片包含的 step 数
-OUTPUT_DIR="outputs/datasets/teacher_cam/noised_collection_1128"                      # --out：数据输出目录
+OUTPUT_DIR="outputs/datasets/collection_12_11"                      # --out：数据输出目录
 DEPTH_ENCODER_CKPT=""                                          # --depth-encoder-checkpoint：学生深度编码器权重（可为空）
 LATENT_INTERVAL=5                                              # --latent-interval：深度 latent 更新间隔
 DATASET_FORMAT="npz"                                           # --dataset-format：数据格式，目前仅支持 npz
 DEPTH_DTYPE="uint16"                                          # --depth-dtype：深度图保存精度（float32 或 uint16）
 DEPTH_SCALE=1000.0                                             # --depth-scale：当保存为 uint16 时的缩放倍数
-OBS_NOISE_STD=0.05                                              # --obs-noise-std：写盘观测的零均值高斯噪声标准差（不影响教师决策）
 VIDEO_FLAG=false                                               # --video：是否录制视频（true/false）
 VIDEO_LENGTH=500                                               # --video_length：录制的视频长度
 REALTIME_FLAG=false                                            # --real-time：是否按真实时间节奏采集
@@ -87,7 +86,6 @@ COLLECT_CMD=("${PYTHON_BIN}" "scripts/rsl_rl/collect.py"
     "--dataset-format" "${DATASET_FORMAT}"
     "--depth-dtype" "${DEPTH_DTYPE}"
     "--depth-scale" "${DEPTH_SCALE}"
-    "--obs-noise-std" "${OBS_NOISE_STD}"
     "--video_length" "${VIDEO_LENGTH}"
 )
 
