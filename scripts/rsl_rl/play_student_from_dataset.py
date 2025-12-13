@@ -113,12 +113,10 @@ def load_student_policy_for_play(
 
 class StudentOnlineRunner:
     """
-    Maintains two-level histories and runs the student policy with a temporal window.
+    Maintains short histories for tokenization and runs the student policy step-by-step.
 
-    For each env, short histories gather prop/dep frames to form per-step tokens, and
-    longer sequence deques of length `sequence_length` buffer those tokens so the model
-    sees [S, ...] sequences (matching offline training). Only the last step from the
-    forward pass is used as the action.
+    Each call to ``act`` feeds only the current step (S=1) to the Transformer-XL; long
+    temporal context is carried through the per-layer memories ``self.mems``.
     """
 
     def __init__(
@@ -144,8 +142,6 @@ class StudentOnlineRunner:
 
         self.prop_histories: List[deque] = [deque(maxlen=prop_hist_len) for _ in range(num_envs)]
         self.depth_histories: List[deque] = [deque(maxlen=depth_hist_len) for _ in range(num_envs)]
-        self.seq_prop_histories: List[deque] = [deque(maxlen=sequence_length) for _ in range(num_envs)]
-        self.seq_depth_histories: List[deque] = [deque(maxlen=sequence_length) for _ in range(num_envs)]
         # TXL memory per env (list of tensors per layer)
         self.mems: List[List[torch.Tensor]] = []
 
@@ -154,10 +150,6 @@ class StudentOnlineRunner:
         for hist in self.prop_histories:
             hist.clear()
         for hist in self.depth_histories:
-            hist.clear()
-        for hist in self.seq_prop_histories:
-            hist.clear()
-        for hist in self.seq_depth_histories:
             hist.clear()
         # reset mems for all envs
         self.mems = [self.model.temporal_model.reset_mems(1) for _ in range(self.num_envs)]
@@ -168,12 +160,10 @@ class StudentOnlineRunner:
             if bool(done):
                 self.prop_histories[env_id].clear()
                 self.depth_histories[env_id].clear()
-                self.seq_prop_histories[env_id].clear()
-                self.seq_depth_histories[env_id].clear()
                 self.mems[env_id] = self.model.temporal_model.reset_mems(1)
 
     def num_ready_envs(self) -> int:
-        """Return number of envs whose短历史已填满（可以推理动作）。"""
+        """Return number of envs whose short histories are ready for inference."""
         ready = 0
         for prop_hist, depth_hist in zip(self.prop_histories, self.depth_histories):
             if len(prop_hist) == self.prop_hist_len and len(depth_hist) == self.depth_hist_len:
@@ -201,40 +191,22 @@ class StudentOnlineRunner:
             self.depth_histories[env_id].append(depth_image[env_id])
 
         ready_indices: List[int] = []
+        prop_tensors: List[torch.Tensor] = []
+        depth_tensors: List[torch.Tensor] = []
         for env_id in range(self.num_envs):
             if len(self.prop_histories[env_id]) == self.prop_hist_len and len(self.depth_histories[env_id]) == self.depth_hist_len:
                 prop_stack = torch.cat(list(self.prop_histories[env_id]), dim=0)  # [prop_hist_len * proprio_dim]
                 depth_stack = torch.stack(list(self.depth_histories[env_id]), dim=0)  # [depth_hist_len, H, W]
-                self.seq_prop_histories[env_id].append(prop_stack)
-                self.seq_depth_histories[env_id].append(depth_stack)
-                # 只要短历史准备好就可以推理；序列长度不足 sequence_length 时直接用当前可用长度，mems 负责长时信息。
+                prop_tensors.append(prop_stack.unsqueeze(0).unsqueeze(0))  # [1, 1, prop_hist_len * proprio_dim]
+                depth_tensors.append(depth_stack.unsqueeze(0).unsqueeze(0))  # [1, 1, depth_hist_len, H, W]
                 ready_indices.append(env_id)
 
         actions = torch.zeros(self.num_envs, self.model.action_head.action_dim, device=self.device)
 
         if ready_indices:
-            prop_tensors: List[torch.Tensor] = []
-            depth_tensors: List[torch.Tensor] = []
             mems_ready: List[torch.Tensor] = []
-            seq_lengths = [len(self.seq_prop_histories[env_id]) for env_id in ready_indices]
-            max_seq_len = max(seq_lengths)
-            for env_id in ready_indices:
-                # 左侧零填充到当前 batch 中的最大序列长度，以便 cat 不出错。
-                prop_seq_list = list(self.seq_prop_histories[env_id])
-                depth_seq_list = list(self.seq_depth_histories[env_id])
-                cur_len = len(prop_seq_list)
-                if cur_len < max_seq_len:
-                    pad_len = max_seq_len - cur_len
-                    prop_pad = [torch.zeros_like(prop_seq_list[0]) for _ in range(pad_len)]
-                    depth_pad = [torch.zeros_like(depth_seq_list[0]) for _ in range(pad_len)]
-                    prop_seq_list = prop_pad + prop_seq_list
-                    depth_seq_list = depth_pad + depth_seq_list
-                prop_seq = torch.stack(prop_seq_list, dim=0)  # [S, prop_hist_len * proprio_dim]
-                depth_seq = torch.stack(depth_seq_list, dim=0)  # [S, depth_hist_len, H, W]
-                prop_tensors.append(prop_seq.unsqueeze(0))  # [1, S, prop_hist_len * proprio_dim]
-                depth_tensors.append(depth_seq.unsqueeze(0))  # [1, S, depth_hist_len, H, W]
-            proprios_ready = torch.cat(prop_tensors, dim=0)  # [N_ready, S, prop_hist_len * proprio_dim]
-            depths_ready = torch.cat(depth_tensors, dim=0)  # [N_ready, S, depth_hist_len, H, W]
+            proprios_ready = torch.cat(prop_tensors, dim=0)  # [N_ready, 1, prop_hist_len * proprio_dim]
+            depths_ready = torch.cat(depth_tensors, dim=0)  # [N_ready, 1, depth_hist_len, H, W]
             # gather and pad mems across envs for each layer
             for layer_idx in range(self.num_layers):
                 layer_mems: List[torch.Tensor] = [self.mems[env_id][layer_idx] for env_id in ready_indices]
@@ -252,8 +224,10 @@ class StudentOnlineRunner:
                             padded.append(torch.cat([pad, m], dim=1))
                     mems_ready.append(torch.cat(padded, dim=0))
             with torch.no_grad():
-                pred_ready, new_mems = self.model(proprios_ready, depths_ready, mems=mems_ready, return_mems=True)  # [N_ready, S, action_dim]
-            actions_ready = pred_ready[:, -1, :]  # take action from last timestep of the sequence
+                pred_ready, new_mems = self.model.forward_step(  # type: ignore[attr-defined]
+                    proprios_ready, depths_ready, mems=mems_ready, return_mems=True
+                )  # [N_ready, 1, action_dim]
+            actions_ready = pred_ready[:, 0, :]  # single-step output
             for idx, env_id in enumerate(ready_indices):
                 actions[env_id] = actions_ready[idx]
                 # update mems for this env (detach to avoid graph accumulation)

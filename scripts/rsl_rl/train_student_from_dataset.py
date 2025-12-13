@@ -9,7 +9,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Deque, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Deque, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -42,103 +42,13 @@ ProprioEncoder = load_symbol(MODULES_ROOT / "tokenizers" / "proprio_encoder.py",
 
 
 @dataclass
-class SequenceSample:
-    """One training sample consisting of a contiguous sequence."""
+class BatchSequenceSample:
+    """A batch-aligned training sample spanning all environments."""
 
-    env_id: int
-    proprio: np.ndarray  # [S, hist_len * state_dim]
-    depth: np.ndarray  # [S, depth_hist_len, H, W]
-    actions: np.ndarray  # [S, action_dim]
-    dones: np.ndarray  # [S]
-
-
-class SequenceAggregator:
-    """Aggregates per-environment steps into temporal windows for training."""
-
-    def __init__(
-        self,
-        num_envs: int,
-        prop_hist_len: int,
-        depth_hist_len: int,
-        sequence_len: int,
-    ) -> None:
-        self.num_envs = num_envs
-        self.prop_hist_len = prop_hist_len
-        self.depth_hist_len = depth_hist_len
-        self.sequence_len = sequence_len
-        self.prop_histories: List[Deque[np.ndarray]] = [
-            deque(maxlen=prop_hist_len) for _ in range(num_envs)
-        ]
-        self.depth_histories: List[Deque[np.ndarray]] = [
-            deque(maxlen=depth_hist_len) for _ in range(num_envs)
-        ]
-        self.sequence_buffers: List[Deque[Dict[str, np.ndarray]]] = [
-            deque(maxlen=sequence_len) for _ in range(num_envs)
-        ]
-
-    def reset(self) -> None:
-        for prop_hist in self.prop_histories:
-            prop_hist.clear()
-        for depth_hist in self.depth_histories:
-            depth_hist.clear()
-        for seq_buf in self.sequence_buffers:
-            seq_buf.clear()
-
-    def push_step(
-        self,
-        obs_prop: np.ndarray,
-        depth_frame: np.ndarray,
-        teacher_actions: np.ndarray,
-        done: np.ndarray,
-    ) -> List[SequenceSample]:
-        """Consume a synchronized environment step and emit ready sequences."""
-
-        ready: List[SequenceSample] = []
-        for env_id in range(self.num_envs):
-            prop_hist = self.prop_histories[env_id]
-            depth_hist = self.depth_histories[env_id]
-            seq_buf = self.sequence_buffers[env_id]
-
-            prop_hist.append(obs_prop[env_id].astype(np.float32, copy=False))
-            depth_hist.append(depth_frame[env_id].astype(np.float32, copy=False))
-
-            if len(prop_hist) < self.prop_hist_len or len(depth_hist) < self.depth_hist_len:
-                if done[env_id]:
-                    self._reset_env(env_id)
-                continue
-
-            prop_stack = np.concatenate(list(prop_hist), axis=0).astype(np.float32, copy=False)
-            depth_stack = np.stack(list(depth_hist), axis=0).astype(np.float32, copy=False)
-
-            seq_buf.append(
-                {
-                    "prop": prop_stack,
-                    "depth": depth_stack,
-                    "action": teacher_actions[env_id].astype(np.float32, copy=False),
-                    "done": bool(done[env_id]),
-                }
-            )
-
-            if len(seq_buf) == self.sequence_len:
-                ready.append(self._pack_sequence(env_id))
-
-            if done[env_id]:
-                self._reset_env(env_id)
-
-        return ready
-
-    def _pack_sequence(self, env_id: int) -> SequenceSample:
-        seq = list(self.sequence_buffers[env_id])
-        proprio = np.stack([step["prop"] for step in seq], axis=0)
-        depth = np.stack([step["depth"] for step in seq], axis=0)
-        actions = np.stack([step["action"] for step in seq], axis=0)
-        dones = np.array([step["done"] for step in seq], dtype=bool)
-        return SequenceSample(env_id=env_id, proprio=proprio, depth=depth, actions=actions, dones=dones)
-
-    def _reset_env(self, env_id: int) -> None:
-        self.prop_histories[env_id].clear()
-        self.depth_histories[env_id].clear()
-        self.sequence_buffers[env_id].clear()
+    proprio: np.ndarray  # [B, S, prop_hist_len * proprio_dim]
+    depth: np.ndarray  # [B, S, depth_hist_len, H, W]
+    actions: np.ndarray  # [B, S, action_dim]
+    dones: np.ndarray  # [B, S]
 
 
 class TeacherDatasetStreamer:
@@ -164,12 +74,6 @@ class TeacherDatasetStreamer:
         self.shards: List[Path] = sorted(shards_root.glob("shard_*.npz"))
         if not self.shards:
             raise FileNotFoundError(f"No dataset shards found in {shards_root}")
-        self.aggregator = SequenceAggregator(
-            num_envs=self.num_envs,
-            prop_hist_len=prop_hist_len,
-            depth_hist_len=depth_hist_len,
-            sequence_len=sequence_len,
-        )
 
     @staticmethod
     def _load_meta(dataset_dir: Path) -> Dict[str, object]:
@@ -179,11 +83,22 @@ class TeacherDatasetStreamer:
         with meta_path.open("r", encoding="utf-8") as meta_file:
             return json.load(meta_file)
 
-    def iter_sequences(self, max_sequences: Optional[int] = None) -> Iterator[SequenceSample]:
-        """Yield SequenceSample entries for one epoch."""
+    def iter_batches(self, max_batches: Optional[int] = None) -> Iterator[BatchSequenceSample]:
+        """Yield batch-aligned temporal segments without overlap."""
 
-        self.aggregator.reset()
+        prop_histories: List[Deque[np.ndarray]] = [
+            deque(maxlen=self.prop_hist_len) for _ in range(self.num_envs)
+        ]
+        depth_histories: List[Deque[np.ndarray]] = [
+            deque(maxlen=self.depth_hist_len) for _ in range(self.num_envs)
+        ]
+        segment_prop: List[np.ndarray] = []
+        segment_depth: List[np.ndarray] = []
+        segment_actions: List[np.ndarray] = []
+        segment_dones: List[np.ndarray] = []
         yielded = 0
+        proprio_dim: Optional[int] = None
+        action_dim: Optional[int] = None
 
         for shard_path in self.shards:
             with np.load(shard_path, allow_pickle=False) as shard:
@@ -191,24 +106,100 @@ class TeacherDatasetStreamer:
                 actions = shard["action_teacher"].astype(np.float32)
                 dones = shard["done"].astype(bool)
                 depth = shard["depth"]
+                if obs_prop.shape[1] != self.num_envs:
+                    raise ValueError(
+                        f"Shard {shard_path} expected num_envs={self.num_envs}, got {obs_prop.shape[1]}"
+                    )
+                if actions.shape[1] != self.num_envs or dones.shape[1] != self.num_envs:
+                    raise ValueError(f"Shard {shard_path} env dimension mismatch in actions/dones")
+
+                proprio_dim = proprio_dim or obs_prop.shape[-1]
+                action_dim = action_dim or actions.shape[-1]
+                if proprio_dim != obs_prop.shape[-1]:
+                    raise ValueError(f"Shard {shard_path} proprio_dim mismatch: {obs_prop.shape[-1]} vs {proprio_dim}")
+                if action_dim != actions.shape[-1]:
+                    raise ValueError(f"Shard {shard_path} action_dim mismatch: {actions.shape[-1]} vs {action_dim}")
                 num_steps = obs_prop.shape[0]
 
                 for step_idx in range(num_steps):
-                    depth_frame = self._convert_depth(depth[step_idx])
-                    ready = self.aggregator.push_step(
-                        obs_prop=obs_prop[step_idx],
-                        depth_frame=depth_frame,
-                        teacher_actions=actions[step_idx],
-                        done=dones[step_idx].reshape(-1),
-                    )
-                    for sample in ready:
-                        yield sample
-                        yielded += 1
-                        if max_sequences is not None and yielded >= max_sequences:
-                            self.aggregator.reset()
-                            return
+                    obs_step = obs_prop[step_idx]
+                    actions_step = actions[step_idx]
+                    dones_step = dones[step_idx].astype(bool).reshape(self.num_envs)
+                    depth_step = self._convert_depth(depth[step_idx])
+                    if depth_step.shape[0] != self.num_envs:
+                        raise ValueError(
+                            f"Shard {shard_path} depth env dimension {depth_step.shape[0]} != {self.num_envs}"
+                        )
 
-        self.aggregator.reset()
+                    for env_id in range(self.num_envs):
+                        prop_histories[env_id].append(obs_step[env_id].astype(np.float32, copy=False))
+                        depth_histories[env_id].append(depth_step[env_id].astype(np.float32, copy=False))
+
+                    all_ready = all(
+                        len(prop_histories[env_id]) == self.prop_hist_len
+                        and len(depth_histories[env_id]) == self.depth_hist_len
+                        for env_id in range(self.num_envs)
+                    )
+
+                    if all_ready:
+                        prop_stack = np.stack(
+                            [
+                                np.concatenate(list(prop_histories[env_id]), axis=0).astype(np.float32, copy=False)
+                                for env_id in range(self.num_envs)
+                            ],
+                            axis=0,
+                        )
+                        depth_stack = np.stack(
+                            [
+                                np.stack(list(depth_histories[env_id]), axis=0).astype(np.float32, copy=False)
+                                for env_id in range(self.num_envs)
+                            ],
+                            axis=0,
+                        )
+                        segment_prop.append(prop_stack)
+                        segment_depth.append(depth_stack)
+                        segment_actions.append(actions_step.astype(np.float32, copy=False))
+                        segment_dones.append(dones_step.astype(bool, copy=False))
+
+                        if len(segment_prop) == self.sequence_len:
+                            proprio_seq = np.swapaxes(np.stack(segment_prop, axis=0), 0, 1)
+                            depth_seq = np.swapaxes(np.stack(segment_depth, axis=0), 0, 1)
+                            actions_seq = np.swapaxes(np.stack(segment_actions, axis=0), 0, 1)
+                            dones_seq = np.swapaxes(np.stack(segment_dones, axis=0), 0, 1)
+                            assert proprio_seq.shape[0] == self.num_envs, "Batch size must equal num_envs"
+                            assert depth_seq.shape[0] == self.num_envs, "Batch size must equal num_envs"
+                            assert actions_seq.shape[0] == self.num_envs, "Batch size must equal num_envs"
+                            assert dones_seq.shape[0] == self.num_envs, "Batch size must equal num_envs"
+                            assert proprio_seq.shape[1] == self.sequence_len, "Sequence length mismatch"
+                            assert depth_seq.shape[1] == self.sequence_len, "Sequence length mismatch"
+                            assert actions_seq.shape[1] == self.sequence_len, "Sequence length mismatch"
+                            assert dones_seq.shape[1] == self.sequence_len, "Sequence length mismatch"
+                            if proprio_dim is not None:
+                                assert (
+                                    proprio_seq.shape[2] == self.prop_hist_len * proprio_dim
+                                ), "Proprio feature dimension mismatch"
+                            if action_dim is not None:
+                                assert actions_seq.shape[2] == action_dim, "Action dimension mismatch"
+                            assert depth_seq.shape[2] == self.depth_hist_len, "Depth history length mismatch"
+                            yield BatchSequenceSample(
+                                proprio=proprio_seq,
+                                depth=depth_seq,
+                                actions=actions_seq,
+                                dones=dones_seq,
+                            )
+                            yielded += 1
+                            segment_prop.clear()
+                            segment_depth.clear()
+                            segment_actions.clear()
+                            segment_dones.clear()
+                            if max_batches is not None and yielded >= max_batches:
+                                return
+
+                    # Reset histories immediately when an env is done.
+                    for env_id in range(self.num_envs):
+                        if dones_step[env_id]:
+                            prop_histories[env_id].clear()
+                            depth_histories[env_id].clear()
 
     def _convert_depth(self, depth_np: np.ndarray) -> np.ndarray:
         if self.depth_dtype == "uint16":
@@ -281,8 +272,6 @@ class MultiModalStudentPolicy(nn.Module):
             tanh_output=action_head_cfg.get("tanh_output", False),
             action_scale=action_head_cfg.get("action_scale", 1.0),
         )
-        # Filled in by training loop: one memory list per env_id.
-        self._env_mems: List[List[Tensor]] = []
 
     def forward(
         self,
@@ -322,6 +311,35 @@ class MultiModalStudentPolicy(nn.Module):
             return actions, new_mems
         return actions
 
+    def forward_step(
+        self,
+        proprio_step: Tensor,
+        depth_step: Tensor,
+        mems: Optional[List[Optional[Tensor]]] = None,
+        return_mems: bool = True,
+    ):
+        """
+        Run a single-timestep inference pass with recurrent memories.
+
+        Args:
+            proprio_step: Tensor[B, 1, prop_hist_len * proprio_dim] or Tensor[B, prop_hist_len * proprio_dim]
+            depth_step: Tensor[B, 1, depth_hist_len, H, W] or Tensor[B, depth_hist_len, H, W]
+            mems: Optional TXL memories (list of [B, M, d]).
+            return_mems: Whether to return updated memories.
+        """
+
+        if proprio_step.dim() == 2:
+            proprio_step = proprio_step.unsqueeze(1)
+        if proprio_step.dim() != 3 or proprio_step.size(1) != 1:
+            raise ValueError("proprio_step must have shape [B, 1, prop_hist_len * proprio_dim]")
+
+        if depth_step.dim() == 4:
+            depth_step = depth_step.unsqueeze(1)
+        if depth_step.dim() != 5 or depth_step.size(1) != 1:
+            raise ValueError("depth_step must have shape [B, 1, depth_hist_len, H, W]")
+
+        return self.forward(proprio_step, depth_step, mems=mems, return_mems=return_mems)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -330,7 +348,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=str, required=True, help="Path to collect.py output directory.")
     parser.add_argument("--device", type=str, default="cuda:0", help="Training device (e.g., cuda:0 or cpu).")
     parser.add_argument("--num_epochs", type=int, default=5, help="Number of passes over the dataset.")
-    parser.add_argument("--batch_size", type=int, default=8, help="Number of sequences per optimization step.")
     parser.add_argument("--sequence_length", type=int, default=16, help="Temporal window size for training samples.")
     parser.add_argument("--prop_hist_len", type=int, default=3, help="History length (in steps) for proprio tokens.")
     parser.add_argument("--depth_hist_len", type=int, default=4, help="Number of stacked depth frames per sample.")
@@ -338,7 +355,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for AdamW optimizer.")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping threshold (L2 norm).")
     parser.add_argument("--log_interval", type=int, default=100, help="Steps between logging training metrics.")
-    parser.add_argument("--max_sequences_per_epoch", type=int, default=None, help="Optional cap on sequences per epoch.")
+    parser.add_argument("--max_batches_per_epoch", type=int, default=None, help="Optional cap on segments per epoch.")
     parser.add_argument("--save_dir", type=str, default=None, help="Directory to store checkpoints (defaults to dataset dir).")
     parser.add_argument("--resume", type=str, default=None, help="Optional checkpoint to resume training from.")
     parser.add_argument("--wandb_project", type=str, default="robot_camera_offline_student", help="Weights & Biases project name.")
@@ -466,9 +483,16 @@ def run_training() -> None:
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
-    def reset_all_env_mems() -> None:
-        """Initialize TXL memories for each env_id (batch dimension = 1)."""
-        model._env_mems = [model.temporal_model.reset_mems(1) for _ in range(streamer.num_envs)]  # type: ignore[attr-defined]
+    def init_batch_mems(batch_size: int) -> List[torch.Tensor]:
+        """Allocate unified TXL memories [layer][B, mem_len, C] on the model device."""
+        mem_len = model.temporal_model.mem_len
+        token_dim = model.temporal_model.d_model
+        device_t = next(model.parameters()).device
+        dtype_t = next(model.parameters()).dtype
+        return [
+            torch.zeros(batch_size, mem_len, token_dim, device=device_t, dtype=dtype_t)
+            for _ in range(len(model.temporal_model.layers))
+        ]
 
     def get_current_lr(opt: torch.optim.Optimizer) -> float:
         for group in opt.param_groups:
@@ -483,6 +507,7 @@ def run_training() -> None:
             "num_envs": streamer.num_envs,
             "num_shards": len(streamer.shards),
             "camera_resolution": streamer.camera_resolution,
+            "max_batches_per_epoch": args.max_batches_per_epoch,
         }
         wandb.init(
             project=args.wandb_project,
@@ -510,23 +535,17 @@ def run_training() -> None:
     for epoch in range(start_epoch, args.num_epochs):
         epoch_start = time.time()
         model.train()
-        reset_all_env_mems()
-        batch: List[SequenceSample] = []
         running_loss = 0.0
         num_updates = 0
-        sequences_seen = 0
+        batches_seen = 0
+        mems = init_batch_mems(streamer.num_envs)
 
-        for sample in streamer.iter_sequences(max_sequences=args.max_sequences_per_epoch):
-            batch.append(sample)
-            sequences_seen += 1
-            if len(batch) < args.batch_size:
-                continue
-
-            loss, grad_norm = train_batch(model, optimizer, batch, device, args.grad_clip)
+        for batch in streamer.iter_batches(max_batches=args.max_batches_per_epoch):
+            loss, grad_norm, mems = train_batch(model, optimizer, batch, device, args.grad_clip, mems)
             running_loss += loss
             num_updates += 1
+            batches_seen += 1
             global_step += 1
-            batch.clear()
 
             if args.use_wandb:
                 wandb.log(
@@ -543,32 +562,15 @@ def run_training() -> None:
                 avg_loss = running_loss / max(1, num_updates)
                 print(
                     f"[epoch {epoch}] step {global_step} | "
-                    f"updates={num_updates} | avg_loss={avg_loss:.6f} | sequences={sequences_seen}"
-                )
-
-        if batch:
-            loss, grad_norm = train_batch(model, optimizer, batch, device, args.grad_clip)
-            running_loss += loss
-            num_updates += 1
-            global_step += 1
-            batch.clear()
-            if args.use_wandb:
-                wandb.log(
-                    {
-                        "train/loss": loss,
-                        "train/global_step": global_step,
-                        "train/epoch": epoch,
-                        "train/grad_norm": grad_norm,
-                        "train/lr": get_current_lr(optimizer),
-                    }
+                    f"updates={num_updates} | avg_loss={avg_loss:.6f} | batches={batches_seen}"
                 )
 
         epoch_time = time.time() - epoch_start
         avg_loss = running_loss / max(1, num_updates)
-        seqs_per_sec = sequences_seen / max(1e-8, epoch_time)
+        batches_per_sec = batches_seen / max(1e-8, epoch_time)
         print(
             f"[epoch {epoch}] completed in {epoch_time:.1f}s | "
-            f"updates={num_updates} | sequences={sequences_seen} | avg_loss={avg_loss:.6f}"
+            f"updates={num_updates} | batches={batches_seen} | avg_loss={avg_loss:.6f}"
         )
 
         if args.use_wandb:
@@ -578,8 +580,8 @@ def run_training() -> None:
                     "train/epoch_time": epoch_time,
                     "train/epoch": epoch,
                     "train/num_updates": num_updates,
-                    "train/sequences_seen": sequences_seen,
-                    "train/sequences_per_sec": seqs_per_sec,
+                    "train/batches_seen": batches_seen,
+                    "train/batches_per_sec": batches_per_sec,
                 }
             )
 
@@ -593,37 +595,50 @@ def run_training() -> None:
 def train_batch(
     model: MultiModalStudentPolicy,
     optimizer: torch.optim.Optimizer,
-    batch_samples: Sequence[SequenceSample],
+    batch: BatchSequenceSample,
     device: torch.device,
     grad_clip: float,
-) -> Tuple[float, Optional[float]]:
-    proprio = torch.from_numpy(np.stack([sample.proprio for sample in batch_samples], axis=0)).to(device)
-    depth = torch.from_numpy(np.stack([sample.depth for sample in batch_samples], axis=0)).to(device)
-    teacher_actions = torch.from_numpy(
-        np.stack([sample.actions for sample in batch_samples], axis=0)
-    ).to(device)
+    mems: List[torch.Tensor],
+) -> Tuple[float, Optional[float], List[torch.Tensor]]:
+    """Single optimization step on one batch-aligned segment."""
 
-    # Assemble per-layer memories for this mini-batch (B may mix envs).
-    num_layers = len(model.temporal_model.layers)
-    mems_in: List[torch.Tensor] = []
-    for layer_idx in range(num_layers):
-        mems_layer = [model._env_mems[s.env_id][layer_idx] for s in batch_samples]  # type: ignore[attr-defined]
-        # 对齐长度：不同 env 的 mem 可能是空（0 长度）或已达 mem_len，需要左侧零填充到同一长度再 concat
-        target_len = max(m.size(1) for m in mems_layer)
-        if target_len == 0:
-            mems_in.append(torch.cat(mems_layer, dim=0))
-        else:
-            padded: List[torch.Tensor] = []
-            for m in mems_layer:
-                if m.size(1) == target_len:
-                    padded.append(m)
-                else:
-                    pad_len = target_len - m.size(1)
-                    pad = torch.zeros(m.size(0), pad_len, m.size(2), device=m.device, dtype=m.dtype)
-                    padded.append(torch.cat([pad, m], dim=1))
-            mems_in.append(torch.cat(padded, dim=0))
+    proprio = torch.from_numpy(batch.proprio).to(device)
+    depth = torch.from_numpy(batch.depth).to(device)
+    teacher_actions = torch.from_numpy(batch.actions).to(device)
+    dones = torch.from_numpy(batch.dones).to(device)
 
-    predictions, new_mems = model(proprio, depth, mems=mems_in, return_mems=True)
+    batch_size, seq_len, prop_feat = proprio.shape
+    assert batch_size == depth.shape[0] == teacher_actions.shape[0] == dones.shape[0], "B dimension mismatch"
+    assert batch_size == mems[0].size(0), "Memory batch size must match num_envs"
+    assert depth.shape[1] == seq_len and teacher_actions.shape[1] == seq_len, "S dimension mismatch"
+    assert len(mems) == len(model.temporal_model.layers), "Memory layers length mismatch"
+    assert prop_feat % model.prop_hist_len == 0, "Proprio feature dimension must align with prop history length"
+    mem_len_expected = model.temporal_model.mem_len
+    token_dim = model.temporal_model.d_model
+    for layer_mem in mems:
+        assert layer_mem.dim() == 3, "Each memory tensor must be [B, M, C]"
+        assert layer_mem.size(0) == batch_size, "Memory batch size mismatch"
+        assert layer_mem.size(2) == token_dim, "Memory token_dim mismatch"
+        if mem_len_expected > 0:
+            assert layer_mem.size(1) == mem_len_expected, "Memory length mismatch"
+
+    current_mems: List[torch.Tensor] = [m.detach().to(device) for m in mems]
+    preds_per_step: List[Tensor] = []
+
+    for t in range(seq_len):
+        proprio_step = proprio[:, t : t + 1, :]
+        depth_step = depth[:, t : t + 1, ...]
+        pred_step, new_mems = model.forward_step(proprio_step, depth_step, mems=current_mems, return_mems=True)
+        preds_per_step.append(pred_step)
+
+        dones_t = dones[:, t]
+        if dones_t.dtype != torch.bool:
+            dones_t = dones_t.bool()
+        reset_mask = (~dones_t).view(batch_size, 1, 1).to(pred_step.device)
+        current_mems = [layer_mem * reset_mask for layer_mem in new_mems]
+
+    predictions = torch.cat(preds_per_step, dim=1)
+    assert predictions.shape == teacher_actions.shape, "Prediction/action shape mismatch"
     loss = torch.nn.functional.mse_loss(predictions, teacher_actions)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
@@ -632,17 +647,8 @@ def train_batch(
         grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip))
     optimizer.step()
 
-    # Update per-env memories (detach to break graph) and reset on done.
-    with torch.no_grad():
-        for batch_idx, sample in enumerate(batch_samples):
-            env_id = sample.env_id
-            if sample.dones.any():
-                model._env_mems[env_id] = model.temporal_model.reset_mems(1)
-            else:
-                updated = [mem[batch_idx : batch_idx + 1].detach() for mem in new_mems]  # type: ignore[arg-type]
-                model._env_mems[env_id] = updated
-
-    return float(loss.item()), grad_norm
+    mems_out = [m.detach() for m in current_mems]
+    return float(loss.item()), grad_norm, mems_out
 
 
 if __name__ == "__main__":
