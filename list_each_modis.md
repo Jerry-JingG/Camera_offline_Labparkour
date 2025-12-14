@@ -1,0 +1,42 @@
+# Xuanheng
+
+commmit1&2: 添加parkour_tasks/pyproject.toml和parkour_isaaclab/__init__.py以正确安装环境
+
+commit3:
+修改了collect.py，扰动逻辑位于413行。如要启用，使用--noised_action argument
+env.step()采用的是扰动后的动作，但采集的action是未加扰动的。采集的数据用于模仿学习，所以我们希望给学生模型用作label的action是没有扰动的
+考虑了向量化环境，生成一个随机掩码，决定哪些环境在这个 step 使用噪声
+
+commit4:
+在collect.py中添加了观测扰动代码，位于439行。如要启用，使用--noised_observation argument
+在parkour_teacher_cam_cfg.py中添加了UnitreeGo2TeacherCamParkourEnvCfg_COLLECT，通过定制self.events实现了域随机化
+如果需要使用域随机化，修改run_collect.sh中的TASK_ID。已在__init__.py中注册COLLECT环境
+
+commit5&6:
+大幅修改了train_student_from_dataset.py文件
+旧版代码batch_size!=num_envs并且切片得到的sequence_0, sequence_1, sequence_2是重叠的
+
+TransformerXL网络在监督训练时，它的输入流是这样的：
+输入batch0, batch1, batch2...  batch_i是不同环境同一段时间内教师模型与环境交互的切片
+batch_i[j]与batch_i+1[j]必须是同一环境下连续的两片时间内教师模型与环境交互的切片
+这样才可以训练transformerxl网络利用历史状态
+
+因此：
+batch_size必须等于num_envs，并且sequence_0, sequence_1, sequence_2应该相接！
+
+commit7:
+train_student_dagger v1： 提示，在使用dagger训练之前，最好先改好txl的inference。不然会跑得很慢
+
+train_student_dagger需要学生策略一步一步与环境交互：模型不知道下一步的观测是什么，所以只能一步一步往外蹦action
+与train dataset不同，dataset预先获得了完整的轨迹，所以可以让transformer输入一整个sequence，并行地，一次输出一个sequence的action
+
+transformerxl的inference与一般的transformer不同，txl运用历史状态，在inference时只对最新输入的xt计算QKV，所以推理很快
+一般的transformer需要对累积的 x{t-mem_len}.....xt 都计算QKV
+
+commit8：
+修改了yky的play_student.py 之前那一版直接使用kv cache(memory)了，但是现在还没训过使用memory的学生。所以实现了一版像一般的casual transformer那样推理的代码
+在train_student_from_dataset中，几乎每个类函数都添加了注释，希望可以帮到你们
+还有一个非常重要的修改。旧版本的play_student和train_student_from_dataset，prop_histories和depth_histories是空的，所以学生会等到depth_histories达到depth_hist_len再输出动作，
+这是不合理的，学生策略应该在第一步就能输出动作
+现在的play_student和train_student_from_dataset都在prop_histories和depth_histories初始化时将prop_histories和depth_histories置零，这样在第一步就可以输出
+由于现在的play_student和train_student_from_dataset逻辑是绑定的，最好先用我的train_student_from_dataset训一版再play

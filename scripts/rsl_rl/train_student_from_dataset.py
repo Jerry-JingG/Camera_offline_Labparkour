@@ -1,3 +1,15 @@
+"""
+Stateful (Batch-Aligned) Training Script
+
+TransformerXL网络在监督训练时, 它的输入流是这样的:
+输入batch0, batch1, batch2...  batch_i是不同环境同一段时间内教师模型与环境交互的切片
+batch_i[j]与batch_i+1[j]必须是同一环境下连续的两片时间内教师模型与环境交互的切片
+这样才可以训练transformerxl网络利用历史状态
+
+因此：
+batch_size必须等于num_envs, 并且batch0和batch1之间不能有时间片重叠
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -41,18 +53,119 @@ DepthEncoder = load_symbol(MODULES_ROOT / "tokenizers" / "depth_encoder.py", "De
 ProprioEncoder = load_symbol(MODULES_ROOT / "tokenizers" / "proprio_encoder.py", "ProprioEncoder")
 
 
-@dataclass
-class BatchSequenceSample:
-    """A batch-aligned training sample spanning all environments."""
+class SequenceAggregator:
+    """
+    prop_histories和depth_histories用于聚合fusion transformer需要的聚合历史输入
+    我对prop_histories和depth_histories初始化时进行了填零操作, 这样第一个环境步transformerxl就可以输出action
+    sequence_buffers[i]存储了第i个环境的s&a序列
+    """
 
-    proprio: np.ndarray  # [B, S, prop_hist_len * proprio_dim]
-    depth: np.ndarray  # [B, S, depth_hist_len, H, W]
-    actions: np.ndarray  # [B, S, action_dim]
-    dones: np.ndarray  # [B, S]
+    def __init__(
+        self,
+        num_envs: int,
+        prop_hist_len: int,
+        depth_hist_len: int,
+        sequence_len: int,
+        num_prop: int = 53,
+        depth_shape: Tuple[int, int] = (58, 87)
+    ) -> None:
+        self.num_envs = num_envs
+        self.prop_hist_len = prop_hist_len
+        self.depth_hist_len = depth_hist_len
+        self.sequence_len = sequence_len
+        self.prop_histories: List[Deque[np.ndarray]] = [
+            deque(maxlen=prop_hist_len) for _ in range(num_envs)
+        ]
+        self.depth_histories: List[Deque[np.ndarray]] = [
+            deque(maxlen=depth_hist_len) for _ in range(num_envs)
+        ]
+        self.prop_dim = num_prop
+        self.depth_shape = depth_shape
+
+        # 初始化历史队列 (Deque) 并预填充 0
+        for env_id in range(num_envs):
+            self._reset_done(env_id)
+
+        self.sequence_buffers: List[List[Dict[str, np.ndarray]]] = [[] for _ in range(num_envs)]
+
+    def reset(self) -> None:
+        for env_id in range(self.num_envs):
+            self._reset_done(env_id)
+            self.sequence_buffers[env_id] = []
+
+    def push_step(self, obs_prop, depth_frame, teacher_actions, done):
+        """
+        对env_id作循环, 每次push_step将为sequence_buffers中的每一个序列增添一个环境步的s-a对数据
+        当len(sequence_buffers[0])==sequence_len, 返回一个完整的batch (此时batch中每一个sequence长度都为sequence_len)
+        否则返回None
+        """
+        for env_id in range(self.num_envs):
+            self.prop_histories[env_id].append(obs_prop[env_id])
+            self.depth_histories[env_id].append(depth_frame[env_id])
+
+            prop_stack = np.concatenate(list(self.prop_histories[env_id]), axis=0)
+            depth_stack = np.stack(list(self.depth_histories[env_id]), axis=0)
+
+            self.sequence_buffers[env_id].append({
+                "prop": prop_stack,
+                "depth": depth_stack,
+                "action": teacher_actions[env_id],
+                "done": done[env_id]  # 记录 Done 信号，对 Stateful 训练很重要
+            })
+
+            # 处理 Done (只清空 history，不清空 sequence_buffer, 否则输出维度会不匹配(输出的是一整个batch))
+            if done[env_id]:
+                self._reset_done(env_id)
+
+        if len(self.sequence_buffers[0]) == self.sequence_len:
+            # 保证sequence_buffers的每一项的长度是相等的
+            for i in range(1, self.num_envs):
+                if (len(self.sequence_buffers[i]) != self.sequence_len):
+                    raise RuntimeError(f"sequence_buffers[{i}]和sequence_buffers[0]的长度不一致")
+            return self._pack_batch()  # 返回整个 Batch
+        else:
+            return None
+
+    def _pack_batch(self):
+        """
+        将 List[List[Dict]] 转换为 Numpy Batch
+        Output Shape: [Num_Envs, Seq_Len, Features]
+        """
+        prop_batch, depth_batch, action_batch, done_batch = [], [], [], []
+
+        for env_id in range(self.num_envs):
+            seq = self.sequence_buffers[env_id]
+            # Stack time dimension
+            prop_batch.append(np.stack([s["prop"] for s in seq]))
+            depth_batch.append(np.stack([s["depth"] for s in seq]))
+            action_batch.append(np.stack([s["action"] for s in seq]))
+            done_batch.append(np.stack([s["done"] for s in seq]))
+
+            # 关键：清空 buffer，实现非重叠
+            self.sequence_buffers[env_id] = []
+
+        return {
+            "proprio": np.stack(prop_batch),  # [16, 64, 53*3]
+            "depth": np.stack(depth_batch),  # [16, 64, 4, H, W]
+            "actions": np.stack(action_batch),
+            "dones": np.stack(done_batch)    # [16, 64]
+        }
+
+    def _reset_done(self, env_id: int) -> None:
+        self.prop_histories[env_id].clear()
+        self.depth_histories[env_id].clear()
+        # self.sequence_buffers[env_id].clear()
+        for _ in range(self.prop_hist_len):
+            self.prop_histories[env_id].append(np.zeros(self.prop_dim, dtype=np.float32))
+        for _ in range(self.depth_hist_len):
+            self.depth_histories[env_id].append(np.zeros(self.depth_shape, dtype=np.float32))
 
 
 class TeacherDatasetStreamer:
-    """Streams teacher trajectories and exposes fused temporal samples."""
+    """
+    collect采集到的数据是[total_steps, num_envs, s&a], 而训练时需要[num_envs, sequence_len, s&a]的batch数据
+    所以需要使用两个for循环, 重新排列数据
+    """
 
     def __init__(
         self,
@@ -83,22 +196,10 @@ class TeacherDatasetStreamer:
         with meta_path.open("r", encoding="utf-8") as meta_file:
             return json.load(meta_file)
 
-    def iter_batches(self, max_batches: Optional[int] = None) -> Iterator[BatchSequenceSample]:
-        """Yield batch-aligned temporal segments without overlap."""
-
-        prop_histories: List[Deque[np.ndarray]] = [
-            deque(maxlen=self.prop_hist_len) for _ in range(self.num_envs)
-        ]
-        depth_histories: List[Deque[np.ndarray]] = [
-            deque(maxlen=self.depth_hist_len) for _ in range(self.num_envs)
-        ]
-        segment_prop: List[np.ndarray] = []
-        segment_depth: List[np.ndarray] = []
-        segment_actions: List[np.ndarray] = []
-        segment_dones: List[np.ndarray] = []
-        yielded = 0
-        proprio_dim: Optional[int] = None
-        action_dim: Optional[int] = None
+    def iter_batches(self, max_sequences: Optional[int] = None) -> Iterator[Dict[str, np.ndarray]]:
+        """对step_idx做循环, 每一次循环调用push_step(), 每sequence_len次循环会返回一个batch_data"""
+        self.aggregator.reset()
+        batches_yielded = 0
 
         for shard_path in self.shards:
             with np.load(shard_path, allow_pickle=False) as shard:
