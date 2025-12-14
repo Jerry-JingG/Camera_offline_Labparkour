@@ -6,7 +6,7 @@
 """Script to train RL agent with RSL-RL."""
 
 """Launch Isaac Sim Simulator first."""
-import os 
+import os
 import argparse
 import sys
 
@@ -14,6 +14,15 @@ from isaaclab.app import AppLauncher
 
 # local imports
 import cli_args  # isort: skip
+
+# Ensure project-local packages (parkour_isaaclab, parkour_tasks, etc.) are importable
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+PARKOUR_TASKS_ROOT = os.path.join(PROJECT_ROOT, "parkour_tasks")
+if PARKOUR_TASKS_ROOT not in sys.path:
+    sys.path.insert(0, PARKOUR_TASKS_ROOT)
 
 
 # add argparse arguments
@@ -84,7 +93,26 @@ from isaaclab.envs import (
     multi_agent_to_single_agent,
 )
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.io import dump_pickle, dump_yaml
+try:
+    # Newer Isaac Lab versions expose these helpers here.
+    from isaaclab.utils.io import dump_pickle, dump_yaml  # type: ignore
+except ImportError:
+    # Fallback for older Isaac Lab versions: implement minimal
+    # dump_pickle / dump_yaml so training can still run.
+    import pickle
+    from pathlib import Path
+
+    def dump_pickle(path, obj):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as f:
+            pickle.dump(obj, f)
+
+    def dump_yaml(path, obj):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            f.write(repr(obj))
 from parkour_tasks.extreme_parkour_task.config.go2.agents.parkour_rl_cfg import ParkourRslRlOnPolicyRunnerCfg
 from vecenv_wrapper import ParkourRslRlVecEnvWrapper
 # import isaaclab_tasks  # noqa: F401

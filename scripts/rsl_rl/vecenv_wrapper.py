@@ -43,7 +43,9 @@ class ParkourRslRlVecEnvWrapper(VecEnv):
         self._modify_action_space()
 
         # reset at the start since the RSL-RL runner does not call reset
+        print("[DEBUG] VecEnvWrapper: before env.reset() in __init__")
         self.env.reset()
+        print("[DEBUG] VecEnvWrapper: env.reset() returned")
 
 
     def __str__(self):

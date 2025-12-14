@@ -254,6 +254,7 @@ class MultiModalStudentPolicy(nn.Module):
         super().__init__()
         self.prop_hist_len = prop_hist_len
         self.depth_hist_len = depth_hist_len
+        self.token_dim = token_dim
         height, width = camera_resolution
 
         self.proprio_encoder = ProprioEncoder(
@@ -327,6 +328,47 @@ class MultiModalStudentPolicy(nn.Module):
         )
         actions = self.action_head.forward_sequence(temporal_out)["mean"]
         return actions
+
+    def forward_step(
+        self,
+        proprio_step: Tensor,
+        depth_step: Tensor,
+        mems: Optional[List[Optional[Tensor]]] = None,
+    ) -> Tuple[Tensor, Optional[List[Tensor]]]:
+        """单步前向接口，用于在线推理 / DAGGER。
+
+        Args:
+            proprio_step: Tensor[B, prop_hist_len * proprio_dim]
+            depth_step: Tensor[B, depth_hist_len, H, W]
+            mems: Transformer-XL 的记忆状态列表，长度等于 TXL 层数，或 None。
+
+        Returns:
+            actions_step: Tensor[B, action_dim]，当前步动作均值。
+            new_mems: 更新后的记忆状态列表。
+        """
+        if proprio_step.dim() != 2:
+            raise ValueError("proprio_step must have shape [B, F].")
+        if depth_step.dim() != 4:
+            raise ValueError("depth_step must have shape [B, T, H, W].")
+
+        batch_size, feat_dim = proprio_step.shape
+        # [B, 1, C]
+        prop_encoded = self.proprio_encoder(proprio_step)
+        # [B, N_vis, C]
+        depth_encoded = self.depth_encoder(depth_step)
+        fused = self.fusion_transformer(prop_encoded, depth_encoded)
+        fused_step = fused["all_pooled"].unsqueeze(1)  # [B, 1, C]
+
+        temporal_out, new_mems = self.temporal_model(
+            fused_step,
+            mems=mems,
+            causal_mask=True,
+            return_mems=True,
+        )
+        # temporal_out: [B, 1, C] -> [B, 1, action_dim]
+        actions_seq = self.action_head.forward_sequence(temporal_out)["mean"]
+        actions_step = actions_seq[:, -1, :]
+        return actions_step, new_mems
 
 
 def parse_args() -> argparse.Namespace:

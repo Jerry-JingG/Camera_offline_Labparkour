@@ -76,6 +76,9 @@ def main():
     env_cfg = parse_env_cfg(
         args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs, use_fabric=not args_cli.disable_fabric
     )
+    # 临时绕过 delta_yaw_ok 观测组，避免空 shape 触发 ObservationManager 维度拼接报错
+    if hasattr(env_cfg.observations, "delta_yaw_ok"):
+        env_cfg.observations.delta_yaw_ok = None
     agent_cfg: ParkourRslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
 
     # specify directory for logging experiments
