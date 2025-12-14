@@ -1,13 +1,13 @@
 """
 Stateful (Batch-Aligned) Training Script
 
-TransformerXL网络在监督训练时，它的输入流是这样的：
+TransformerXL网络在监督训练时, 它的输入流是这样的:
 输入batch0, batch1, batch2...  batch_i是不同环境同一段时间内教师模型与环境交互的切片
 batch_i[j]与batch_i+1[j]必须是同一环境下连续的两片时间内教师模型与环境交互的切片
 这样才可以训练transformerxl网络利用历史状态
 
 因此：
-batch_size必须等于num_envs，并且batch0和batch1之间不能有时间片重叠
+batch_size必须等于num_envs, 并且batch0和batch1之间不能有时间片重叠
 """
 
 from __future__ import annotations
@@ -53,7 +53,11 @@ ProprioEncoder = load_symbol(MODULES_ROOT / "tokenizers" / "proprio_encoder.py",
 
 
 class SequenceAggregator:
-    """ Stateful Aggregator: 输出的是 [Num_Envs, Seq_Len, Features] 的整块 Batch """
+    """
+    prop_histories和depth_histories用于聚合fusion transformer需要的聚合历史输入
+    我对prop_histories和depth_histories初始化时进行了填零操作, 这样第一个环境步transformerxl就可以输出action
+    sequence_buffers[i]存储了第i个环境的s&a序列
+    """
 
     def __init__(
         self,
@@ -77,25 +81,23 @@ class SequenceAggregator:
         self.prop_dim = num_prop
         self.depth_shape = depth_shape
 
-        # 1. 初始化历史队列 (Deque) 并预填充 0
-        # 这样从第1步开始就能生成数据，不用等待 warm-up
+        # 初始化历史队列 (Deque) 并预填充 0
         for env_id in range(num_envs):
-            self._reset_env(env_id)
+            self._reset_done(env_id)
 
         self.sequence_buffers: List[List[Dict[str, np.ndarray]]] = [[] for _ in range(num_envs)]
 
     def reset(self) -> None:
         for env_id in range(self.num_envs):
-            self._reset_env(env_id)
+            self._reset_done(env_id)
             self.sequence_buffers[env_id] = []
 
     def push_step(self, obs_prop, depth_frame, teacher_actions, done):
-        # 这个函数现在必须保证：
-        # 1. 要么返回 None (数据不够)
-        # 2. 要么返回一个完整的 Batch (包含所有 Envs 的数据)
-
-        batch_ready = False
-
+        """
+        对env_id作循环, 每次push_step将为sequence_buffers中的每一个序列增添一个环境步的s-a对数据
+        当len(sequence_buffers[0])==sequence_len, 返回一个完整的batch (此时batch中每一个sequence长度都为sequence_len)
+        否则返回None
+        """
         for env_id in range(self.num_envs):
             self.prop_histories[env_id].append(obs_prop[env_id])
             self.depth_histories[env_id].append(depth_frame[env_id])
@@ -110,14 +112,15 @@ class SequenceAggregator:
                 "done": done[env_id]  # 记录 Done 信号，对 Stateful 训练很重要
             })
 
-            if len(self.sequence_buffers[env_id]) == self.sequence_len:
-                batch_ready = True
-
             # 处理 Done (只清空 history，不清空 sequence_buffer, 否则输出维度会不匹配(输出的是一整个batch))
             if done[env_id]:
-                self._reset_env(env_id)
+                self._reset_done(env_id)
 
-        if batch_ready:
+        if len(self.sequence_buffers[0]) == self.sequence_len:
+            # 保证sequence_buffers的每一项的长度是相等的
+            for i in range(1, self.num_envs):
+                if (len(self.sequence_buffers[i]) != self.sequence_len):
+                    raise RuntimeError(f"sequence_buffers[{i}]和sequence_buffers[0]的长度不一致")
             return self._pack_batch()  # 返回整个 Batch
         else:
             return None
@@ -147,7 +150,7 @@ class SequenceAggregator:
             "dones": np.stack(done_batch)    # [16, 64]
         }
 
-    def _reset_env(self, env_id: int) -> None:
+    def _reset_done(self, env_id: int) -> None:
         self.prop_histories[env_id].clear()
         self.depth_histories[env_id].clear()
         # self.sequence_buffers[env_id].clear()
@@ -158,7 +161,10 @@ class SequenceAggregator:
 
 
 class TeacherDatasetStreamer:
-    """Streams teacher trajectories and exposes Batch-aligned samples."""
+    """
+    collect采集到的数据是[total_steps, num_envs, s&a], 而训练时需要[num_envs, sequence_len, s&a]的batch数据
+    所以需要使用两个for循环, 重新排列数据
+    """
 
     def __init__(
         self,
@@ -196,7 +202,7 @@ class TeacherDatasetStreamer:
             return json.load(meta_file)
 
     def iter_batches(self, max_sequences: Optional[int] = None) -> Iterator[Dict[str, np.ndarray]]:
-        """Yields full batches of shape [Num_Envs, Seq_Len, ...]"""
+        """对step_idx做循环, 每一次循环调用push_step(), 每sequence_len次循环会返回一个batch_data"""
         self.aggregator.reset()
         batches_yielded = 0
 
