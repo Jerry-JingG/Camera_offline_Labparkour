@@ -14,7 +14,7 @@ NUM_ENVS=64                                                    # --num_envs：�
 TOTAL_STEPS=5120                                               # --total_steps：总采集步数（一次 step 全部 env 同步计数）
 SHARD_SIZE=1024                                                # --shard_size：每个数据分片包含的 step 数
 
-OUTPUT_DIR="outputs/datasets/teacher_cam/collection_clean1"                      # --out：数据输出目录
+OUTPUT_DIR="outputs/collection_datasets/collection_12_17"                      # --out：数据输出目录
 DEPTH_ENCODER_CKPT=""                                          # --depth-encoder-checkpoint：学生深度编码器权重（可为空）
 LATENT_INTERVAL=5                                              # --latent-interval：深度 latent 更新间隔
 DATASET_FORMAT="npz"                                           # --dataset-format：数据格式，目前仅支持 npz
