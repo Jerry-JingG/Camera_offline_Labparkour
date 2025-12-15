@@ -3,9 +3,9 @@
 
 set -euo pipefail
 
-TASK_ID="Isaac-Extreme-Parkour-Student-Unitree-Go2-Play-v0"   # 目标验证环境
+TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Play-v0"   # 目标验证环境（TeacherCam 版，含深度相机）
 NUM_ENVS=1                                                    # 并行环境数，GUI 建议 1
-STUDENT_CKPT="logs/rsl_rl/student_dagger_transformer/student_dagger_017200.pt"  # 学生模型权重
+STUDENT_CKPT="logs/rsl_rl/student_dagger_transformer/student-dagger-12-14/student_epoch_012300.pt"  # 学生模型权重
 
 DEVICE_ARG="cuda:0"                                           # 推理设备
 HEADLESS_FLAG=false                                        # GUI 运行设为 false；无界面设为 true

@@ -160,22 +160,36 @@ class StudentOnlineRunner:
 
         self.prop_histories: List[deque] = [deque(maxlen=prop_hist_len) for _ in range(num_envs)]
         self.depth_histories: List[deque] = [deque(maxlen=depth_hist_len) for _ in range(num_envs)]
-        self.mems: List[List[torch.Tensor]] = []
+        self.mems: List[torch.Tensor] | None = None
         self.reset()
 
     def reset(self) -> None:
-        for hist in self.prop_histories:
-            hist.clear()
-        for hist in self.depth_histories:
-            hist.clear()
-        self.mems = [self.model.temporal_model.reset_mems(1) for _ in range(self.num_envs)]
+        """Pre-fill history with zeros so first step is ready, and clear TXL mems."""
+        for env_id in range(self.num_envs):
+            self.prop_histories[env_id].clear()
+            self.depth_histories[env_id].clear()
+            for _ in range(self.prop_hist_len):
+                self.prop_histories[env_id].append(torch.zeros(self.proprio_dim, device=self.device))
+            for _ in range(self.depth_hist_len):
+                self.depth_histories[env_id].append(torch.zeros(*self.camera_resolution, device=self.device))
+        self.mems = None
 
     def reset_done(self, done_mask: torch.Tensor) -> None:
+        """Clear histories and TXL mems for envs that are done."""
+        done_mask = done_mask.to(self.device)
         for env_id, done in enumerate(done_mask):
             if bool(done):
                 self.prop_histories[env_id].clear()
                 self.depth_histories[env_id].clear()
-                self.mems[env_id] = self.model.temporal_model.reset_mems(1)
+                for _ in range(self.prop_hist_len):
+                    self.prop_histories[env_id].append(torch.zeros(self.proprio_dim, device=self.device))
+                for _ in range(self.depth_hist_len):
+                    self.depth_histories[env_id].append(torch.zeros(*self.camera_resolution, device=self.device))
+        if self.mems is not None:
+            for mem in self.mems:
+                if mem is None or mem.numel() == 0:
+                    continue
+                mem[done_mask] = 0.0
 
     def act(self, obs_prop: torch.Tensor, depth_image: torch.Tensor) -> torch.Tensor:
         obs_prop = obs_prop.to(self.device)
@@ -190,48 +204,21 @@ class StudentOnlineRunner:
             self.prop_histories[env_id].append(obs_prop[env_id])
             self.depth_histories[env_id].append(depth_image[env_id])
 
-        ready_indices: List[int] = []
-        prop_tensors: List[torch.Tensor] = []
-        depth_tensors: List[torch.Tensor] = []
+        prop_batch = []
+        depth_batch = []
         for env_id in range(self.num_envs):
-            if len(self.prop_histories[env_id]) == self.prop_hist_len and len(self.depth_histories[env_id]) == self.depth_hist_len:
-                prop_stack = torch.cat(list(self.prop_histories[env_id]), dim=0)
-                depth_stack = torch.stack(list(self.depth_histories[env_id]), dim=0)
-                prop_tensors.append(prop_stack.unsqueeze(0).unsqueeze(0))
-                depth_tensors.append(depth_stack.unsqueeze(0).unsqueeze(0))
-                ready_indices.append(env_id)
+            prop_stack = torch.cat(list(self.prop_histories[env_id])[-self.prop_hist_len :], dim=0)
+            depth_stack = torch.stack(list(self.depth_histories[env_id])[-self.depth_hist_len :], dim=0)
+            prop_batch.append(prop_stack)
+            depth_batch.append(depth_stack)
 
-        actions = torch.zeros(self.num_envs, self.model.action_head.action_dim, device=self.device)
-        if not ready_indices:
-            return actions
+        prop_batch_t = torch.stack(prop_batch)  # [B, prop_hist_len * proprio_dim]
+        depth_batch_t = torch.stack(depth_batch)  # [B, depth_hist_len, H, W]
 
-        # gather mems and pad to the same length per layer
-        mems_ready: List[torch.Tensor] = []
-        for layer_idx in range(self.num_layers):
-            layer_mems = [self.mems[env_id][layer_idx] for env_id in ready_indices]
-            target_len = max(m.size(1) for m in layer_mems)
-            if target_len == 0:
-                mems_ready.append(torch.cat(layer_mems, dim=0))
-            else:
-                padded: List[torch.Tensor] = []
-                for m in layer_mems:
-                    if m.size(1) == target_len:
-                        padded.append(m)
-                    else:
-                        pad_len = target_len - m.size(1)
-                        pad = torch.zeros(m.size(0), pad_len, m.size(2), device=m.device, dtype=m.dtype)
-                        padded.append(torch.cat([pad, m], dim=1))
-                mems_ready.append(torch.cat(padded, dim=0))
-
-        proprios_ready = torch.cat(prop_tensors, dim=0)
-        depths_ready = torch.cat(depth_tensors, dim=0)
         with torch.no_grad():
-            pred_ready, new_mems = self.model.forward_step(proprios_ready, depths_ready, mems=mems_ready, return_mems=True)
-        actions_ready = pred_ready[:, 0, :]
-        for idx, env_id in enumerate(ready_indices):
-            actions[env_id] = actions_ready[idx]
-            self.mems[env_id] = [mem[idx : idx + 1].detach() for mem in new_mems]  # type: ignore[arg-type]
-        return actions
+            actions_step, new_mems = self.model.forward_step(prop_batch_t, depth_batch_t, mems=self.mems)
+        self.mems = new_mems
+        return actions_step
 
 
 def main() -> None:
