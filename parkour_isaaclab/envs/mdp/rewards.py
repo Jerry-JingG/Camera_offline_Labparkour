@@ -96,7 +96,12 @@ class reward_action_rate(ManagerTermBase):
     def __init__(self, cfg: RewardTermCfg, env: ParkourManagerBasedRLEnv):
         super().__init__(cfg, env)
         action_term = env.action_manager.get_term('joint_pos')
-        num_actions = len(action_term._joint_ids)  # Use action dimension, not total joints
+        if hasattr(action_term, "_num_joints"):
+            num_actions = int(action_term._num_joints)
+        elif isinstance(action_term._joint_ids, (list, tuple)):
+            num_actions = len(action_term._joint_ids)
+        else:
+            num_actions = env.scene[cfg.params.get("asset_cfg", SceneEntityCfg("robot")).name].num_joints
         self.previous_actions = torch.zeros(env.num_envs, 2, num_actions, dtype=torch.float, device=self.device)
         
     def reset(self, env_ids: Sequence[int] | None = None) -> None:

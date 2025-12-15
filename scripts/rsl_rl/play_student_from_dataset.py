@@ -156,8 +156,10 @@ class StudentOnlineRunner:
 
     def reset_done(self, done_mask: torch.Tensor) -> None:
         """Clear histories for environments where done_mask is True."""
-        for env_id, done in enumerate(done_mask):
-            if bool(done):
+        # Normalize to 1D boolean tensor to avoid 0-d iteration errors when num_envs=1.
+        mask = torch.as_tensor(done_mask, device=self.device).flatten().to(dtype=torch.bool)
+        for env_id, done in enumerate(mask.tolist()):
+            if done:
                 self.prop_histories[env_id].clear()
                 self.depth_histories[env_id].clear()
                 self.mems[env_id] = self.model.temporal_model.reset_mems(1)
@@ -354,7 +356,8 @@ def main() -> None:
                 mean_norm = float("nan")
             print(f"[student_play] step={step} mean_action_norm={mean_norm:.6f}")
         obs_next, rews, dones, extras = vec_env.step(actions)
-        done_mask = dones.squeeze(-1).bool()
+        # Keep done mask as 1D to avoid 0-d tensors when num_envs=1
+        done_mask = dones.view(-1).bool()
         if done_mask.any():
             runner.reset_done(done_mask)
 

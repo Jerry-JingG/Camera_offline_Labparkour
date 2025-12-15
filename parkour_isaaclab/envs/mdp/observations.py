@@ -40,7 +40,13 @@ class ExtremeParkourObservations(ManagerTermBase):
         # 3 (ang_vel) + 2 (imu) + 1 + 1 + 1 + 2 + 1 + 1 + 1 (cmds/env) + num_joints + num_joints + num_actions + 4 (contact)
         num_joints = self.asset.num_joints
         action_term = env.action_manager.get_term('joint_pos')
-        num_actions = len(action_term._joint_ids)  # Get from joint_ids which is set during init
+        # _joint_ids may be a slice; prefer the explicit count if available, otherwise fall back.
+        if hasattr(action_term, "_num_joints"):
+            num_actions = int(action_term._num_joints)
+        elif isinstance(action_term._joint_ids, (list, tuple)):
+            num_actions = len(action_term._joint_ids)
+        else:
+            num_actions = num_joints
         obs_buf_size = 3 + 2 + 1 + 1 + 1 + 2 + 1 + 1 + 1 + num_joints + num_joints + num_actions + 4
         self._obs_history_buffer = torch.zeros(self.num_envs, self.history_length, obs_buf_size, device=self.device)
         self.delta_yaw = torch.zeros(self.num_envs, device=self.device)
