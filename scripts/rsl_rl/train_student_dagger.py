@@ -193,6 +193,16 @@ def main():
     # Isaac's agent config gives num_prop
     num_prop = int(agent_cfg.estimator.num_prop)
     action_dim = int(getattr(vec_env, "num_actions", obs.shape[1]))
+    # meta 信息用于与 dataset 训练保持一致的 checkpoint 结构
+    ckpt_meta = {
+        "num_prop": num_prop,
+        "action_dim": action_dim,
+        "camera_resolution": cam_res,
+        "prop_hist_len": args.prop_hist_len,
+        "depth_hist_len": args.depth_hist_len,
+        "sequence_length": args.sequence_length,
+        "task": args.task,
+    }
 
     # ===== Build Student Policy (same config as offline training) =====
     fusion_cfg = {"num_layers": 2, "num_heads": 4, "mlp_ratio": 2.0, "dropout": 0.1, "attn_dropout": 0.1, "grid_size": 4}
@@ -406,12 +416,21 @@ def main():
                 "optimizer_state_dict": optimizer.state_dict(),
                 "iter": it,
                 "global_step": global_step,
+                "meta": ckpt_meta,
             }
-            torch.save(ckpt, save_dir / f"student_dagger_{it+1:06d}.pt")
-            print(f"[save] {save_dir / f'student_dagger_{it+1:06d}.pt'}")
+            ckpt_path = save_dir / f"student_epoch_{it+1:06d}.pt"
+            torch.save(ckpt, ckpt_path)
+            print(f"[save] {ckpt_path}")
 
     # final save
-    torch.save({"model_state_dict": student.state_dict()}, save_dir / "student_dagger_final.pt")
+    final_ckpt = {
+        "model_state_dict": student.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "iter": args.num_iters,
+        "global_step": global_step,
+        "meta": ckpt_meta,
+    }
+    torch.save(final_ckpt, save_dir / "student_epoch_final.pt")
     print("[done] training finished.")
     if wandb_run is not None:
         wandb_run.finish()
