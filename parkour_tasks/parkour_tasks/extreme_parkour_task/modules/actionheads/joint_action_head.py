@@ -19,6 +19,7 @@ class JointPoseActionHead(nn.Module):
         action_scale: float = 0.5,
     ) -> None:
         super().__init__()
+        self.action_dim = action_dim
         layers = []
         in_features = d_model
         for hidden_dim in hidden_dims:
