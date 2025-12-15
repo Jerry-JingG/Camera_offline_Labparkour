@@ -127,6 +127,29 @@ def parse_args():
         default=0,
         help="预热迭代次数：在这段迭代内由 Teacher 执行环境，学生只学习。",
     )
+    p.add_argument(
+        "--teacher_mixture",
+        action="store_true",
+        help="开启后：在学生执行阶段，以概率 beta 让教师接管动作（beta 会按迭代衰减）。",
+    )
+    p.add_argument(
+        "--teacher_mixture_beta_start",
+        type=float,
+        default=0.6,
+        help="mixture 初始 teacher 概率 beta_start。",
+    )
+    p.add_argument(
+        "--teacher_mixture_beta_end",
+        type=float,
+        default=0.1,
+        help="mixture 最低 teacher 概率 beta_end。",
+    )
+    p.add_argument(
+        "--teacher_mixture_decay_iters",
+        type=int,
+        default=800,
+        help="从 beta_start 线性衰减到 beta_end 所需的迭代数。",
+    )
 
     p.add_argument("--learning_rate", type=float, default=3e-4)
     p.add_argument("--weight_decay", type=float, default=1e-4)
@@ -270,7 +293,8 @@ def main():
             # 接口与 ActorCriticRMA.act_inference 对齐。
             with torch.no_grad():
                 teacher_actions = teacher_policy(obs, hist_encoding=args.teacher_hist_encoding)
-            teacher_actions_np = teacher_actions.cpu().numpy()
+            teacher_actions_cpu = teacher_actions.cpu()
+            teacher_actions_np = teacher_actions_cpu.numpy()
 
             # --- student acting ---
             # build student input from its own histories (aggregator stores them)
@@ -295,11 +319,19 @@ def main():
                 student_act = actions_step.cpu()
 
             # --- env step (student acts) ---
-            # 预热阶段：由 Teacher 推进环境；之后由 Student 推进
+            # 预热阶段：由 Teacher 推进环境；之后由 Student 推进（可选 mixture）
             if it < args.num_pretrain_iters:
-                act_to_env = teacher_actions.cpu()
+                act_to_env = teacher_actions_cpu
             else:
                 act_to_env = student_act
+                if args.teacher_mixture:
+                    progress = max(it - args.num_pretrain_iters, 0)
+                    decay = max(args.teacher_mixture_decay_iters, 1)
+                    mix_frac = min(progress / decay, 1.0)
+                    beta = args.teacher_mixture_beta_start + (args.teacher_mixture_beta_end - args.teacher_mixture_beta_start) * mix_frac
+                    beta = float(np.clip(beta, 0.0, 1.0))
+                    mask = (torch.rand(args.num_envs) < beta).unsqueeze(-1)
+                    act_to_env = torch.where(mask, teacher_actions_cpu, student_act)
 
             obs, rewards, dones, infos = vec_env.step(act_to_env.to(vec_env.device))
             obs = obs.to(device)
