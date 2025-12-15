@@ -1,6 +1,7 @@
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG  # isort: skip
+from parkour_tasks.assets.unitree import UNITREE_GO2W_CFG  # isort: skip
 import isaaclab.sim as sim_utils
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.terrains import TerrainImporterCfg
@@ -12,6 +13,7 @@ from isaaclab.sensors.ray_caster.patterns import PinholeCameraPatternCfg
 from isaaclab.envs import ViewerCfg
 import os, torch 
 from parkour_isaaclab.actuators.parkour_actuator_cfg import ParkourDCMotorCfg
+from isaaclab.actuators import DCMotorCfg
 
 def quat_from_euler_xyz_tuple(roll: torch.Tensor, pitch: torch.Tensor, yaw: torch.Tensor) -> tuple:
     cy = torch.cos(yaw * 0.5)
@@ -81,6 +83,74 @@ class ParkourDefaultSceneCfg(InteractiveSceneCfg):
                         },
             stiffness=40.0,
             damping=1.0,
+            friction=0.0,
+        )
+
+@configclass
+class ParkourGo2WDefaultSceneCfg(InteractiveSceneCfg):
+    """Default scene configuration for Go2W (wheeled quadruped) with locked wheels."""
+    robot: ArticulationCfg = UNITREE_GO2W_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    
+    sky_light = AssetBaseCfg(
+        prim_path="/World/skyLight",
+        spawn=sim_utils.DomeLightCfg(
+            intensity=750.0,
+            texture_file=f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr",
+        ),
+    )
+
+    terrain = TerrainImporterCfg(
+        class_type= ParkourTerrainImporter,
+        prim_path="/World/ground",
+        terrain_type="generator",
+        terrain_generator=None,
+        max_init_terrain_level=2,
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="average",
+            restitution_combine_mode="average",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+        ),
+        visual_material=sim_utils.MdlFileCfg(
+            mdl_path=f"{ISAACLAB_NUCLEUS_DIR}/Materials/TilesMarbleSpiderWhiteBrickBondHoned/TilesMarbleSpiderWhiteBrickBondHoned.mdl",
+            project_uvw=True,
+            texture_scale=(0.25, 0.25),
+        ),
+        debug_vis=False,
+    )
+    def __post_init__(self):
+        self.robot.spawn.articulation_props.enabled_self_collisions = True
+        # Leg actuators with ParkourDCMotor for better control
+        self.robot.actuators['base_legs'] = ParkourDCMotorCfg(
+            joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+            effort_limit={
+                        '.*_hip_joint':35.0,
+                        '.*_thigh_joint':40.0,
+                        '.*_calf_joint':40.0,
+                        },
+            saturation_effort={
+                        '.*_hip_joint':35.0,
+                        '.*_thigh_joint':45.0,
+                        '.*_calf_joint':45.0,
+                        },
+            velocity_limit={
+                        '.*_hip_joint':52.4,
+                        '.*_thigh_joint':30.1,
+                        '.*_calf_joint':30.1,
+                        },
+            stiffness=40.0,
+            damping=1.0,
+            friction=0.0,
+        )
+        # Wheel actuators - locked with high damping for parkour
+        self.robot.actuators['wheels'] = DCMotorCfg(
+            joint_names_expr=[".*_foot_joint"],
+            effort_limit=23.5,
+            saturation_effort=23.5,
+            velocity_limit=30.0,
+            stiffness=0.0,
+            damping=10.0,  # High damping to lock wheels
             friction=0.0,
         )
 

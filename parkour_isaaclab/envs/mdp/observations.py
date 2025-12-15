@@ -36,7 +36,13 @@ class ExtremeParkourObservations(ManagerTermBase):
         self.sensor_cfg = cfg.params["sensor_cfg"]
         self.asset_cfg = cfg.params["asset_cfg"]
         self.history_length = cfg.params['history_length']
-        self._obs_history_buffer = torch.zeros(self.num_envs, self.history_length, 3 + 2 + 3 + 4 + 36 + 5, device=self.device)
+        # Dynamically compute obs_buf size based on robot joints:
+        # 3 (ang_vel) + 2 (imu) + 1 + 1 + 1 + 2 + 1 + 1 + 1 (cmds/env) + num_joints + num_joints + num_actions + 4 (contact)
+        num_joints = self.asset.num_joints
+        action_term = env.action_manager.get_term('joint_pos')
+        num_actions = len(action_term._joint_ids)  # Get from joint_ids which is set during init
+        obs_buf_size = 3 + 2 + 1 + 1 + 1 + 2 + 1 + 1 + 1 + num_joints + num_joints + num_actions + 4
+        self._obs_history_buffer = torch.zeros(self.num_envs, self.history_length, obs_buf_size, device=self.device)
         self.delta_yaw = torch.zeros(self.num_envs, device=self.device)
         self.delta_next_yaw = torch.zeros(self.num_envs, device=self.device)
         self.measured_heights = torch.zeros(self.num_envs, 132, device=self.device)
@@ -128,11 +134,23 @@ class ExtremeParkourObservations(ManagerTermBase):
         default_joint_stiffness = self.asset.data.default_joint_stiffness.to(self.device)
         joint_damping = self.asset.data.joint_damping.to(self.device)
         default_joint_damping = self.asset.data.default_joint_damping.to(self.device)
+        # Safe division: add epsilon to avoid NaN when stiffness/damping is 0 (e.g., wheel joints)
+        eps = 1e-6
+        stiffness_ratio = torch.where(
+            default_joint_stiffness > eps,
+            (joint_stiffness / default_joint_stiffness) - 1,
+            torch.zeros_like(joint_stiffness)
+        )
+        damping_ratio = torch.where(
+            default_joint_damping > eps,
+            (joint_damping / default_joint_damping) - 1,
+            torch.zeros_like(joint_damping)
+        )
         return torch.cat((
             mass_params_tensor,
             friction_coeffs_tensor.unsqueeze(1).to(self.device),
-            (joint_stiffness/ default_joint_stiffness) - 1, 
-            (joint_damping/ default_joint_damping) - 1
+            stiffness_ratio, 
+            damping_ratio
         ), dim=-1).to(self.device)
     
     def _get_heights(self):
