@@ -5,14 +5,20 @@ set -euo pipefail
 
 # ------------------------------- 核心采集参数 ---------------------------------
 TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Play-v0"  # --task：需要采集的 Gym 任务名
-NUM_ENVS=16                                                    # --num_envs：并行环境数量
-TOTAL_STEPS=5000                                               # --total_steps：总采集步数（一次 step 全部 env 同步计数）
-SHARD_SIZE=1000                                                # --shard_size：每个数据分片包含的 step 数
-OUTPUT_DIR="outputs/datasets/collection_12_11"                      # --out：数据输出目录
+# 如果要使用域随机化， TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Collect-v0"
+NUM_ENVS=64                                                    # --num_envs：并行环境数量
+
+
+# shard_size需要为train_student中sequence_length的整数倍!
+
+TOTAL_STEPS=5120                                               # --total_steps：总采集步数（一次 step 全部 env 同步计数）
+SHARD_SIZE=1024                                                # --shard_size：每个数据分片包含的 step 数
+
+OUTPUT_DIR="outputs/datasets/teacher_cam/collection_clean1"                      # --out：数据输出目录
 DEPTH_ENCODER_CKPT=""                                          # --depth-encoder-checkpoint：学生深度编码器权重（可为空）
 LATENT_INTERVAL=5                                              # --latent-interval：深度 latent 更新间隔
 DATASET_FORMAT="npz"                                           # --dataset-format：数据格式，目前仅支持 npz
-DEPTH_DTYPE="uint16"                                          # --depth-dtype：深度图保存精度（float32 或 uint16）
+DEPTH_DTYPE="float32"                                          # --depth-dtype：深度图保存精度（float32 或 uint16）
 DEPTH_SCALE=1000.0                                             # --depth-scale：当保存为 uint16 时的缩放倍数
 VIDEO_FLAG=false                                               # --video：是否录制视频（true/false）
 VIDEO_LENGTH=500                                               # --video_length：录制的视频长度

@@ -448,8 +448,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dataset", type=str, required=True, help="Path to collect.py output directory.")
     parser.add_argument("--device", type=str, default="cuda:0", help="Training device (e.g., cuda:0 or cpu).")
-    parser.add_argument("--num_epochs", type=int, default=5, help="Number of passes over the dataset.")
-    parser.add_argument("--sequence_length", type=int, default=16, help="Temporal window size for training samples.")
+    parser.add_argument("--num_epochs", type=int, default=500, help="Number of passes over the dataset.")
+    # parser.add_argument("--batch_size", type=int, default=8)  batch_size需要等于num_envs!!!
+    parser.add_argument("--sequence_length", type=int, default=64, help="sequence_length = mem_len 是一般transformerxl网络的默认实现")
     parser.add_argument("--prop_hist_len", type=int, default=3, help="History length (in steps) for proprio tokens.")
     parser.add_argument("--depth_hist_len", type=int, default=4, help="Number of stacked depth frames per sample.")
     parser.add_argument("--learning_rate", type=float, default=3e-4, help="Optimizer learning rate.")
@@ -638,11 +639,11 @@ def run_training() -> None:
         model.train()
         running_loss = 0.0
         num_updates = 0
-        batches_seen = 0
-        mems = init_batch_mems(streamer.num_envs)
 
-        for batch in streamer.iter_batches(max_batches=args.max_batches_per_epoch):
-            loss, grad_norm, mems = train_batch(model, optimizer, batch, device, args.grad_clip, mems)
+        # 直接迭代 Batch (无需再组装 samples)
+        for batch_data in streamer.iter_batches(max_sequences=args.max_sequences_per_epoch):
+            loss = train_batch(model, optimizer, batch_data, device, args.grad_clip)
+
             running_loss += loss
             num_updates += 1
             batches_seen += 1
@@ -668,26 +669,11 @@ def run_training() -> None:
 
         epoch_time = time.time() - epoch_start
         avg_loss = running_loss / max(1, num_updates)
-        batches_per_sec = batches_seen / max(1e-8, epoch_time)
-        print(
-            f"[epoch {epoch}] completed in {epoch_time:.1f}s | "
-            f"updates={num_updates} | batches={batches_seen} | avg_loss={avg_loss:.6f}"
-        )
+        print(f"[epoch {epoch}] completed in {epoch_time:.1f}s | avg_loss={avg_loss:.6f}")
 
-        if args.use_wandb:
-            wandb.log(
-                {
-                    "train/epoch_avg_loss": avg_loss,
-                    "train/epoch_time": epoch_time,
-                    "train/epoch": epoch,
-                    "train/num_updates": num_updates,
-                    "train/batches_seen": batches_seen,
-                    "train/batches_per_sec": batches_per_sec,
-                }
-            )
-
-        ckpt_path = save_dir / f"student_epoch_{epoch:04d}.pt"
-        save_checkpoint(ckpt_path, model, optimizer, epoch + 1, global_step, streamer.meta)
+        if epoch % 100 == 99:
+            ckpt_path = save_dir / f"student_epoch_{epoch:04d}.pt"
+            save_checkpoint(ckpt_path, model, optimizer, epoch + 1, global_step, streamer.meta)
 
     if args.use_wandb:
         wandb.finish()

@@ -179,8 +179,8 @@ class StudentOnlineRunner:
             if bool(done):
                 self.prop_histories[env_id].clear()
                 self.depth_histories[env_id].clear()
-                self.temporal_prop_buffers[env_id].clear()
-                self.temporal_depth_buffers[env_id].clear()
+                # self.temporal_prop_buffers[env_id].clear()
+                # self.temporal_depth_buffers[env_id].clear()
 
                 for _ in range(self.prop_hist_len):
                     self.prop_histories[env_id].append(
@@ -205,7 +205,7 @@ class StudentOnlineRunner:
         """
         obs_prop = obs_prop.to(self.device)
         depth_image = depth_image.to(self.device)
-        actions = torch.zeros(self.num_envs, self.model.action_head.action_dim, device=self.device)
+        # actions = torch.zeros(self.num_envs, self.model.action_head.action_dim, device=self.device)
 
         if depth_image.dim() == 4 and depth_image.shape[1] == 1:
             depth_image = depth_image.squeeze(1)
@@ -221,8 +221,8 @@ class StudentOnlineRunner:
             self.temporal_prop_buffers[env_id].append(prop_stack)
             self.temporal_depth_buffers[env_id].append(depth_stack)
 
-            prop_seqs.append(torch.stack(self.temporal_prop_buffers[env_id]))
-            depth_seqs.append(torch.stack(self.temporal_depth_buffers[env_id]))
+            prop_seqs.append(torch.stack(list(self.temporal_prop_buffers[env_id]), dim=0))
+            depth_seqs.append(torch.stack(list(self.temporal_depth_buffers[env_id]), dim=0))
 
         prop_batch = torch.stack(prop_seqs)      # [B, S, P]
         depth_batch = torch.stack(depth_seqs)    # [B, S, D, H, W]
