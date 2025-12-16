@@ -91,3 +91,6 @@ runs/
 checkpoints/
 tmp/
 temp/
+
+# wlg usd files
+wlg_usd_new/
