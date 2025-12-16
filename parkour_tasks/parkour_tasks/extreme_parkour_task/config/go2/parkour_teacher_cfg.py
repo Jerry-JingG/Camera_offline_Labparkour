@@ -14,7 +14,7 @@ class ParkourTeacherSceneCfg(ParkourDefaultSceneCfg):
     height_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base",
         offset=RayCasterCfg.OffsetCfg(pos=(0.375, 0.0, 20.0)),
-        attach_yaw_only=True,
+        ray_alignment="yaw",
         pattern_cfg=patterns.GridPatternCfg(resolution=0.15, size=[1.65, 1.5]),
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],

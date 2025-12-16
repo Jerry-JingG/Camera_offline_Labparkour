@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 使用说明：
 1. 先在 Isaac Lab 环境中启动本工程依赖的 Omniverse/Isaac Sim。
@@ -11,7 +13,7 @@
 3. 采集脚本会：
    - 使用教师策略与环境交互（可自定义并行环境数与步数）。
    - 同步抓取深度相机原始数据，并可按学生流程实时提取 latent / yaw。
-   - 将每 shard（默认为 1000 个环境步）写入 .npz 文件，并输出 meta 与统计信息。
+   - 将每 shard(默认为 1000 个环境步) 写入 .npz 文件，并输出 meta 与统计信息。
 """
 
 """
@@ -23,8 +25,6 @@ env_i:  x0, ..., x_done_t, x_new_0, x_new_1, ..., xT   ← reset 后继续
 ...
 env_n: x0, x1, ...              ....              xT
 """
-
-from __future__ import annotations
 
 import argparse
 import json
@@ -472,7 +472,7 @@ def main():  # noqa: C901
         actions = policy(obs_est, hist_encoding=True)
         actions_cpu = actions.detach().cpu().numpy().astype(np.float32)
 
-        """ 对env施加扰动后的动作从而到达特殊状态，采集未扰动的action作为label """
+        """ 对env施加扰动后的动作从而到达特殊状态, 采集未扰动的action作为label """
         if args_cli.noised_action:
             # 考虑了向量化环境，生成一个随机掩码，决定哪些环境在这个 step 使用噪声
             use_noise_mask = torch.rand(vec_env.num_envs, device=vec_env.device) < perturb_prob

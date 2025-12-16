@@ -342,7 +342,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=str, required=True, help="Path to collect.py output directory.")
     parser.add_argument("--student_checkpoint", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda:0", help="Training device (e.g., cuda:0 or cpu).")
-    parser.add_argument("--num_epochs", type=int, default=100, help="Number of passes over the dataset.")
+    parser.add_argument("--num_epochs", type=int, default=500, help="Number of passes over the dataset.")
     # parser.add_argument("--batch_size", type=int, default=8)  batch_size需要等于num_envs!!!
     parser.add_argument("--sequence_length", type=int, default=64, help="sequence_length = mem_len 是一般transformerxl网络的默认实现")
     parser.add_argument("--prop_hist_len", type=int, default=3, help="History length (in steps) for proprio tokens.")
@@ -481,7 +481,7 @@ def run_training() -> None:
 
         # 直接迭代 Batch (无需再组装 samples)
         for batch_data in streamer.iter_batches(max_sequences=args.max_sequences_per_epoch):
-            loss = train_batch(model, optimizer, batch_data, device, args.grad_clip, streamer)
+            loss = train_batch(model, optimizer, batch_data, device, args.grad_clip)
 
             running_loss += loss
             num_updates += 1
@@ -495,8 +495,9 @@ def run_training() -> None:
         avg_loss = running_loss / max(1, num_updates)
         print(f"[epoch {epoch}] completed in {epoch_time:.1f}s | avg_loss={avg_loss:.6f}")
 
-        ckpt_path = save_dir / f"student_epoch_{epoch:04d}.pt"
-        save_checkpoint(ckpt_path, model, optimizer, epoch + 1, global_step, streamer.meta)
+        if epoch % 100 == 99:
+            ckpt_path = save_dir / f"student_epoch_{epoch:04d}.pt"
+            save_checkpoint(ckpt_path, model, optimizer, epoch + 1, global_step, streamer.meta)
 
 
 def train_batch(
