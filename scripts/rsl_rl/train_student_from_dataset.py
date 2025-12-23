@@ -27,6 +27,13 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("[warning] wandb not installed. Run `pip install wandb` to enable logging.")
+
 # Ensure repo roots are importable
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 MODULES_ROOT = Path(PROJECT_ROOT) / "parkour_tasks" / "parkour_tasks" / "extreme_parkour_task" / "modules"
@@ -54,11 +61,9 @@ ProprioEncoder = load_symbol(MODULES_ROOT / "tokenizers" / "proprio_encoder.py",
 
 class SequenceAggregator:
     """
-    prop_histories和depth_histories用于聚合fusion transformer需要的聚合历史输入
-    我对prop_histories和depth_histories初始化时进行了填零操作, 这样第一个环境步transformerxl就可以输出action
-    sequence_buffers[i]存储了第i个环境的s&a序列
+    [经过优化] 向量化版本：移除所有 Python for 循环，使用 Numpy 矩阵操作。
+    解决 GPU 等待 CPU 数据的问题。
     """
-
     def __init__(
         self,
         num_envs: int,
@@ -72,92 +77,69 @@ class SequenceAggregator:
         self.prop_hist_len = prop_hist_len
         self.depth_hist_len = depth_hist_len
         self.sequence_len = sequence_len
-        self.prop_histories: List[Deque[np.ndarray]] = [
-            deque(maxlen=prop_hist_len) for _ in range(num_envs)
-        ]
-        self.depth_histories: List[Deque[np.ndarray]] = [
-            deque(maxlen=depth_hist_len) for _ in range(num_envs)
-        ]
-        self.prop_dim = num_prop
-        self.depth_shape = depth_shape
+        self.num_prop = num_prop
+        
+        # 1. 历史 Buffer: 预分配内存，不再使用 deque
+        self.prop_history = np.zeros((num_envs, prop_hist_len, num_prop), dtype=np.float32)
+        self.depth_history = np.zeros((num_envs, depth_hist_len, *depth_shape), dtype=np.float32)
 
-        # 初始化历史队列 (Deque) 并预填充 0
-        for env_id in range(num_envs):
-            self._reset_done(env_id)
-
-        self.sequence_buffers: List[List[Dict[str, np.ndarray]]] = [[] for _ in range(num_envs)]
+        # 2. 序列 Buffer: 预分配内存
+        self.seq_prop = np.zeros((num_envs, sequence_len, prop_hist_len * num_prop), dtype=np.float32)
+        self.seq_depth = np.zeros((num_envs, sequence_len, depth_hist_len, *depth_shape), dtype=np.float32)
+        
+        self.seq_action = None 
+        self.seq_done = np.zeros((num_envs, sequence_len), dtype=bool)
+        
+        self.current_seq_step = 0
 
     def reset(self) -> None:
-        for env_id in range(self.num_envs):
-            self._reset_done(env_id)
-            self.sequence_buffers[env_id] = []
+        self.prop_history.fill(0)
+        self.depth_history.fill(0)
+        self.current_seq_step = 0
 
     def push_step(self, obs_prop, depth_frame, teacher_actions, done):
-        """
-        对env_id作循环, 每次push_step将为sequence_buffers中的每一个序列增添一个环境步的s-a对数据
-        当len(sequence_buffers[0])==sequence_len, 返回一个完整的batch (此时batch中每一个sequence长度都为sequence_len)
-        否则返回None
-        """
-        for env_id in range(self.num_envs):
-            self.prop_histories[env_id].append(obs_prop[env_id])
-            self.depth_histories[env_id].append(depth_frame[env_id])
+        # --- 1. 更新历史 (整体左移) ---
+        self.prop_history = np.roll(self.prop_history, -1, axis=1)
+        self.depth_history = np.roll(self.depth_history, -1, axis=1)
+        
+        # 填入最新数据
+        self.prop_history[:, -1, :] = obs_prop
+        self.depth_history[:, -1, :, :] = depth_frame
 
-            prop_stack = np.concatenate(list(self.prop_histories[env_id]), axis=0)
-            depth_stack = np.stack(list(self.depth_histories[env_id]), axis=0)
+        # --- 2. 存入序列 Buffer ---
+        # Flatten Proprio: [Num_Envs, Hist_Len, Dim] -> [Num_Envs, Hist_Len * Dim]
+        current_prop_flat = self.prop_history.reshape(self.num_envs, -1)
+        
+        idx = self.current_seq_step
+        if self.seq_action is None:
+             self.seq_action = np.zeros((self.num_envs, self.sequence_len, teacher_actions.shape[-1]), dtype=np.float32)
 
-            self.sequence_buffers[env_id].append({
-                "prop": prop_stack,
-                "depth": depth_stack,
-                "action": teacher_actions[env_id],
-                "done": done[env_id]  # 记录 Done 信号，对 Stateful 训练很重要
-            })
+        self.seq_prop[:, idx] = current_prop_flat
+        self.seq_depth[:, idx] = self.depth_history 
+        self.seq_action[:, idx] = teacher_actions
+        self.seq_done[:, idx] = done
 
-            # 处理 Done (只清空 history，不清空 sequence_buffer, 否则输出维度会不匹配(输出的是一整个batch))
-            if done[env_id]:
-                self._reset_done(env_id)
+        # --- 3. 处理 Done (批量清零) ---
+        if np.any(done):
+            self.prop_history[done] = 0
+            self.depth_history[done] = 0
 
-        if len(self.sequence_buffers[0]) == self.sequence_len:
-            # 保证sequence_buffers的每一项的长度是相等的
-            for i in range(1, self.num_envs):
-                if (len(self.sequence_buffers[i]) != self.sequence_len):
-                    raise RuntimeError(f"sequence_buffers[{i}]和sequence_buffers[0]的长度不一致")
-            return self._pack_batch()  # 返回整个 Batch
-        else:
-            return None
+        # --- 4. 检查 Batch 是否完成 ---
+        self.current_seq_step += 1
+        if self.current_seq_step == self.sequence_len:
+            batch = self._pack_batch()
+            self.current_seq_step = 0 
+            return batch
+        
+        return None
 
     def _pack_batch(self):
-        """
-        将 List[List[Dict]] 转换为 Numpy Batch
-        Output Shape: [Num_Envs, Seq_Len, Features]
-        """
-        prop_batch, depth_batch, action_batch, done_batch = [], [], [], []
-
-        for env_id in range(self.num_envs):
-            seq = self.sequence_buffers[env_id]
-            # Stack time dimension
-            prop_batch.append(np.stack([s["prop"] for s in seq]))
-            depth_batch.append(np.stack([s["depth"] for s in seq]))
-            action_batch.append(np.stack([s["action"] for s in seq]))
-            done_batch.append(np.stack([s["done"] for s in seq]))
-
-            # 关键：清空 buffer，实现非重叠
-            self.sequence_buffers[env_id] = []
-
         return {
-            "proprio": np.stack(prop_batch),  # [16, 64, 53*3]
-            "depth": np.stack(depth_batch),  # [16, 64, 4, H, W]
-            "actions": np.stack(action_batch),
-            "dones": np.stack(done_batch)    # [16, 64]
+            "proprio": self.seq_prop.copy(),
+            "depth": self.seq_depth.copy(),
+            "actions": self.seq_action.copy(),
+            "dones": self.seq_done.copy()
         }
-
-    def _reset_done(self, env_id: int) -> None:
-        self.prop_histories[env_id].clear()
-        self.depth_histories[env_id].clear()
-        # self.sequence_buffers[env_id].clear()
-        for _ in range(self.prop_hist_len):
-            self.prop_histories[env_id].append(np.zeros(self.prop_dim, dtype=np.float32))
-        for _ in range(self.depth_hist_len):
-            self.depth_histories[env_id].append(np.zeros(self.depth_shape, dtype=np.float32))
 
 
 class TeacherDatasetStreamer:
@@ -354,6 +336,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_sequences_per_epoch", type=int, default=None, help="Optional cap on sequences per epoch.")
     parser.add_argument("--save_dir", type=str, default=None, help="Directory to store checkpoints (defaults to dataset dir).")
     # parser.add_argument("--resume", type=str, default=None)  已被student_checkpoint代替
+    # wandb arguments
+    parser.add_argument("--wandb", action="store_true", help="Enable wandb logging.")
+    parser.add_argument("--wandb_project", type=str, default="offline-BC", help="Wandb project name.")
+    parser.add_argument("--wandb_run_name", type=str, default=None, help="Wandb run name (defaults to auto-generated).")
+    parser.add_argument("--wandb_entity", type=str, default=None, help="Wandb entity (team/username).")
     return parser.parse_args()
 
 
@@ -468,36 +455,156 @@ def run_training() -> None:
         resume_path = Path(args.student_checkpoint).expanduser().resolve()
         start_epoch, global_step = load_checkpoint(resume_path, model, optimizer)
 
+    # Initialize wandb
+    use_wandb = args.wandb and WANDB_AVAILABLE
+    if args.wandb and not WANDB_AVAILABLE:
+        print("[warning] --wandb flag set but wandb is not installed. Skipping wandb logging.")
+    
+    if use_wandb:
+        wandb_config = {
+            "dataset": str(dataset_dir),
+            "num_epochs": args.num_epochs,
+            "sequence_length": args.sequence_length,
+            "prop_hist_len": args.prop_hist_len,
+            "depth_hist_len": args.depth_hist_len,
+            "learning_rate": args.learning_rate,
+            "weight_decay": args.weight_decay,
+            "grad_clip": args.grad_clip,
+            "device": str(device),
+            "num_envs": streamer.num_envs,
+            "proprio_dim": streamer.meta.get("num_prop", 0),
+            "action_dim": streamer.meta.get("action_dim", 0),
+            "camera_resolution": streamer.meta.get("camera_resolution", [64, 64]),
+        }
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            entity=args.wandb_entity,
+            config=wandb_config,
+            resume="allow" if args.student_checkpoint else None,
+        )
+        # Log model architecture
+        wandb.watch(model, log="gradients", log_freq=args.log_interval)
+        print(f"[wandb] Initialized: project={args.wandb_project}, run={wandb.run.name}")
+
     print(
         f"[info] Starting training for {args.num_epochs} epochs "
         f"on dataset {dataset_dir} using device {device}."
     )
 
-    for epoch in range(start_epoch, args.num_epochs):
-        epoch_start = time.time()
-        model.train()
-        running_loss = 0.0
-        num_updates = 0
+    training_start_time = time.time()
+    total_sequences = 0
 
-        # 直接迭代 Batch (无需再组装 samples)
-        for batch_data in streamer.iter_batches(max_sequences=args.max_sequences_per_epoch):
-            loss = train_batch(model, optimizer, batch_data, device, args.grad_clip)
+    try:
+        for epoch in range(start_epoch, args.num_epochs):
+            epoch_start = time.time()
+            model.train()
+            
+            # Epoch-level metrics collectors
+            epoch_losses = []
+            epoch_diff_rmses = []
+            epoch_rel_rmses = []
+            epoch_grad_norms = []
+            epoch_grad_norm_maxs = []
+            epoch_teacher_action_rms = []
+            epoch_teacher_action_abs_max = []
+            
+            num_updates = 0
+            epoch_sequences = 0
 
-            running_loss += loss
-            num_updates += 1
-            global_step += 1
+            # 直接迭代 Batch (无需再组装 samples)
+            for batch_data in streamer.iter_batches(max_sequences=args.max_sequences_per_epoch):
+                batch_start = time.time()
+                metrics = train_batch(model, optimizer, batch_data, device, args.grad_clip)
+                batch_time = time.time() - batch_start
 
-            if args.log_interval > 0 and num_updates % args.log_interval == 0:
-                avg_loss = running_loss / max(1, num_updates)
-                print(f"[epoch {epoch}] step {global_step} | updates={num_updates} | avg_loss={avg_loss:.6f}")
+                # Accumulate metrics
+                epoch_losses.append(metrics["loss"])
+                epoch_diff_rmses.append(metrics["diff_rmse"])
+                epoch_rel_rmses.append(metrics["rel_rmse"])
+                epoch_grad_norms.append(metrics["grad_norm"])
+                epoch_grad_norm_maxs.append(metrics["grad_norm_max"])
+                epoch_teacher_action_rms.append(metrics["teacher_action_rms"])
+                epoch_teacher_action_abs_max.append(metrics["teacher_action_abs_max"])
+                
+                num_updates += 1
+                global_step += 1
+                epoch_sequences += streamer.num_envs  # Each batch contains num_envs sequences
+                total_sequences += streamer.num_envs
 
-        epoch_time = time.time() - epoch_start
-        avg_loss = running_loss / max(1, num_updates)
-        print(f"[epoch {epoch}] completed in {epoch_time:.1f}s | avg_loss={avg_loss:.6f}")
+                # Log step metrics to wandb
+                if use_wandb:
+                    elapsed_time = time.time() - training_start_time
+                    sequences_per_sec = streamer.num_envs / max(batch_time, 1e-6)
+                    # Compute running loss_std from epoch_losses collected so far
+                    loss_std = np.std(epoch_losses) if len(epoch_losses) > 1 else 0.0
+                    
+                    wandb.log({
+                        # train/ metrics
+                        "train/loss": metrics["loss"],
+                        "train/loss_std": loss_std,
+                        "train/diff_rmse": metrics["diff_rmse"],
+                        "train/rel_rmse": metrics["rel_rmse"],
+                        "train/grad_norm": metrics["grad_norm"],
+                        "train/grad_norm_max": metrics["grad_norm_max"],
+                        "train/learning_rate": optimizer.param_groups[0]["lr"],
+                        # teacher/ metrics
+                        "teacher/action_rms": metrics["teacher_action_rms"],
+                        "teacher/action_abs_max": metrics["teacher_action_abs_max"],
+                        # perf/ metrics
+                        "perf/sequences_per_sec": sequences_per_sec,
+                        "perf/total_sequences": total_sequences,
+                        # time/ metrics
+                        "time/elapsed_s": elapsed_time,
+                        # progress/ metrics
+                        "progress/epoch": epoch,
+                        "progress/global_step": global_step,
+                        "progress/sequences_this_epoch": epoch_sequences,
+                    }, step=global_step)
 
-        if epoch % 100 == 99:
-            ckpt_path = save_dir / f"student_epoch_{epoch:04d}.pt"
-            save_checkpoint(ckpt_path, model, optimizer, epoch + 1, global_step, streamer.meta)
+                if args.log_interval > 0 and num_updates % args.log_interval == 0:
+                    avg_loss = np.mean(epoch_losses)
+                    print(f"[epoch {epoch}] step {global_step} | updates={num_updates} | avg_loss={avg_loss:.6f}")
+
+            epoch_time = time.time() - epoch_start
+            
+            # Compute epoch-level statistics
+            epoch_loss_mean = np.mean(epoch_losses) if epoch_losses else 0.0
+            epoch_loss_std = np.std(epoch_losses) if epoch_losses else 0.0
+            epoch_loss_min = np.min(epoch_losses) if epoch_losses else 0.0
+            epoch_loss_max = np.max(epoch_losses) if epoch_losses else 0.0
+            
+            print(f"[epoch {epoch}] completed in {epoch_time:.1f}s | avg_loss={epoch_loss_mean:.6f}")
+
+            # Log epoch-level metrics to wandb
+            if use_wandb:
+                wandb.log({
+                    # epoch/ summary metrics
+                    "epoch/loss_mean": epoch_loss_mean,
+                    "epoch/loss_std": epoch_loss_std,
+                    "epoch/loss_min": epoch_loss_min,
+                    "epoch/loss_max": epoch_loss_max,
+                    "epoch/diff_rmse_mean": np.mean(epoch_diff_rmses) if epoch_diff_rmses else 0.0,
+                    "epoch/rel_rmse_mean": np.mean(epoch_rel_rmses) if epoch_rel_rmses else 0.0,
+                    "epoch/grad_norm_mean": np.mean(epoch_grad_norms) if epoch_grad_norms else 0.0,
+                    "epoch/duration_s": epoch_time,
+                    "epoch/sequences_total": epoch_sequences,
+                    "epoch/sequences_per_sec": epoch_sequences / max(epoch_time, 1e-6),
+                }, step=global_step)
+
+            if epoch % 100 == 99:
+                ckpt_path = save_dir / f"student_epoch_{epoch:04d}.pt"
+                save_checkpoint(ckpt_path, model, optimizer, epoch + 1, global_step, streamer.meta)
+                
+                # Log checkpoint to wandb
+                if use_wandb:
+                    wandb.save(str(ckpt_path))
+
+    finally:
+        # Ensure wandb is properly closed
+        if use_wandb:
+            wandb.finish()
+            print("[wandb] Run finished.")
 
 
 def train_batch(
@@ -506,19 +613,62 @@ def train_batch(
     batch_data: Dict[str, np.ndarray],
     device: torch.device,
     grad_clip: float,
-) -> float:
+) -> Dict[str, float]:
+    """
+    Train a single batch and return detailed metrics.
+    
+    Returns:
+        Dict containing:
+        - loss: MSE loss value
+        - diff_rmse: Root mean square error between predictions and teacher actions
+        - rel_rmse: Relative RMSE (normalized by teacher action RMS)
+        - grad_norm: L2 norm of gradients
+        - grad_norm_max: Maximum gradient norm across parameters
+        - teacher_action_rms: RMS of teacher actions
+        - teacher_action_abs_max: Max absolute value of teacher actions
+    """
     proprio = torch.from_numpy(batch_data["proprio"]).to(device)
     depth = torch.from_numpy(batch_data["depth"]).to(device)
     teacher_actions = torch.from_numpy(batch_data["actions"]).to(device)
 
     predictions = model(proprio, depth)
+    
+    # Compute loss
     loss = torch.nn.functional.mse_loss(predictions, teacher_actions)
+    
+    # Compute additional metrics (before backward to avoid extra computation)
+    with torch.no_grad():
+        diff = predictions - teacher_actions
+        diff_rmse = torch.sqrt(torch.mean(diff ** 2)).item()
+        teacher_action_rms = torch.sqrt(torch.mean(teacher_actions ** 2)).item()
+        teacher_action_abs_max = torch.max(torch.abs(teacher_actions)).item()
+        rel_rmse = diff_rmse / max(teacher_action_rms, 1e-8)
+    
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
+    
+    # Compute gradient norms before clipping
+    grad_norms = []
+    for p in model.parameters():
+        if p.grad is not None:
+            grad_norms.append(p.grad.data.norm(2).item())
+    
+    grad_norm = np.sqrt(sum(g ** 2 for g in grad_norms)) if grad_norms else 0.0
+    grad_norm_max = max(grad_norms) if grad_norms else 0.0
+    
     if grad_clip > 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
-    return float(loss.item())
+    
+    return {
+        "loss": float(loss.item()),
+        "diff_rmse": diff_rmse,
+        "rel_rmse": rel_rmse,
+        "grad_norm": grad_norm,
+        "grad_norm_max": grad_norm_max,
+        "teacher_action_rms": teacher_action_rms,
+        "teacher_action_abs_max": teacher_action_abs_max,
+    }
 
 
 if __name__ == "__main__":
