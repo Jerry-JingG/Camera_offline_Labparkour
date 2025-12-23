@@ -8,9 +8,9 @@ set -euo pipefail
 
 # ------------------------------- 核心训练参数 ---------------------------------
 TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Play-v0"  # --task：带相机的跑酷 Teacher 任务
-NUM_ENVS=384                                                     # --num_envs：并行环境数量（需与 TXL batch 对齐）
-NUM_ITERS=50000                                                  # --num_iters：DAGGER 迭代次数（每次迭代使用一个序列 batch）
-NUM_PRETRAIN_ITERS=0                                            # --num_pretrain_iters：预热迭代次数（与 learn_vision 保持一致，默认 0）
+NUM_ENVS=384                                                      # --num_envs：并行环境数量（先用较小并行数稳定调试）
+NUM_ITERS=50000                                                   # --num_iters：DAGGER 迭代次数（短程实验，确认策略再加大）
+NUM_PRETRAIN_ITERS=200                                           # --num_pretrain_iters：预热迭代，前若干迭代由 Teacher 全程驾驶
 
 SEQUENCE_LENGTH=64                                              # --sequence_length：TXL 序列长度 / mem_len
 PROP_HIST_LEN=3                                                 # --prop_hist_len：ProprioEncoder 的历史步数
@@ -24,13 +24,20 @@ LEARNING_RATE=3e-4                                              # --learning_rat
 WEIGHT_DECAY=1e-4                                               # --weight_decay：AdamW 的 weight decay
 GRAD_CLIP=1.0                                                   # --grad_clip：梯度裁剪阈值（L2 范数）
 
+# -------------------------- 教师-学生混合策略参数 -----------------------------
+# USE_MIXTURE=1 开启 mixture；0 关闭（传统 dagger）。beta 线性从 start 衰减到 end。
+USE_MIXTURE=1
+MIX_BETA_START=0.6
+MIX_BETA_END=0.1
+MIX_DECAY_ITERS=800
+
 # 教师是否使用历史编码（hist_encoding）。开启后 teacher 标签使用 TXL 历史，贴近 train.py/distill 行为。
 TEACHER_HIST_ENCODING=true                                      # --teacher_hist_encoding
 
 # ------------------------------- 日志 / W&B 参数 -------------------------------
 LOGGER="wandb"                                                  # --logger：设置为 wandb 开启 W&B 记录，留空则关闭
 LOG_PROJECT_NAME="parkour-dagger"                              # --log_project_name：W&B Project 名（需先在网页创建）
-RUN_NAME="student-dagger-12-14"                                      # --run_name：W&B run 名称前缀，可自定义/留空
+RUN_NAME="student-dagger-12-15-6"                                      # --run_name：W&B run 名称前缀，可自定义/留空
 # 如需离线记录，可在运行前手动 export WANDB_MODE=offline；如需指定实体，可 export WANDB_ENTITY=your_team
 # 如果只在本机使用且希望写死 Key，可在此填写；为空则使用环境变量或跳过。
 WANDB_API_KEY="85897bb211dff1da90eca7244d836724804604d2"                             # 示例：WANDB_API_KEY="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -109,6 +116,15 @@ DAGGER_CMD=("${PYTHON_BIN}" "scripts/rsl_rl/train_student_dagger.py"
 
 if [[ -n "${STUDENT_CHECKPOINT}" ]]; then
     DAGGER_CMD+=("--student_checkpoint" "${STUDENT_CHECKPOINT}")
+fi
+
+if [[ "${USE_MIXTURE}" -eq 1 ]]; then
+    DAGGER_CMD+=(
+        "--teacher_mixture"
+        "--teacher_mixture_beta_start" "${MIX_BETA_START}"
+        "--teacher_mixture_beta_end" "${MIX_BETA_END}"
+        "--teacher_mixture_decay_iters" "${MIX_DECAY_ITERS}"
+    )
 fi
 
 if [[ -n "${DEVICE_ARG}" ]]; then
