@@ -316,6 +316,82 @@ class MultiModalStudentPolicy(nn.Module):
         actions = self.action_head.forward_sequence(temporal_out)["mean"]
         return actions
 
+    def forward_with_mems(
+        self,
+        proprio_seq: Tensor,
+        depth_seq: Tensor,
+        mems: Optional[List[Tensor]] = None,
+    ) -> Tuple[Tensor, List[Tensor]]:
+        """
+        Forward pass with segment recurrence memory support.
+        
+        Args:
+            proprio_seq: Tensor[B, S, prop_hist_len * proprio_dim]
+            depth_seq: Tensor[B, S, depth_hist_len, H, W]
+            mems: Optional list of memory tensors from previous segment (should be detached)
+        
+        Returns:
+            actions: Predicted action means of shape [B, S, action_dim]
+            new_mems: List of new memory tensors for next segment
+        """
+        batch_size, seq_len, feat_dim = proprio_seq.shape
+        
+        # 1. Encode proprio and depth
+        prop_encoded = self.proprio_encoder(
+            proprio_seq.reshape(batch_size * seq_len, feat_dim)
+        )  # [B*S, 1, C]
+        depth_encoded = self.depth_encoder(
+            depth_seq.reshape(batch_size * seq_len, depth_seq.size(2), depth_seq.size(3), depth_seq.size(4))
+        )  # [B*S, T, C]
+        
+        # 2. Multi-modal fusion
+        fused = self.fusion_transformer(prop_encoded, depth_encoded)
+        fused_seq = fused["all_pooled"].reshape(batch_size, seq_len, -1)
+        
+        # 3. Temporal modeling with memory
+        temporal_out, new_mems = self.temporal_model(
+            fused_seq,
+            mems=mems,           # Pass previous segment's mems (should be detached by caller)
+            causal_mask=True,
+            return_mems=True,    # Return new mems for next segment
+        )
+        
+        # 4. Action head
+        actions = self.action_head.forward_sequence(temporal_out)["mean"]
+        return actions, new_mems
+
+    def forward_step(
+        self,
+        proprio: Tensor,
+        depth: Tensor,
+        mems: Optional[List[Tensor]] = None,
+    ) -> Tuple[Tensor, List[Tensor]]:
+        """
+        Single-step forward for online inference with memory.
+        
+        Args:
+            proprio: Tensor[B, prop_hist_len * proprio_dim] - flattened proprio history
+            depth: Tensor[B, depth_hist_len, H, W] - stacked depth frames
+            mems: Optional list of memory tensors from previous step
+        
+        Returns:
+            actions: Predicted actions of shape [B, action_dim]
+            new_mems: List of new memory tensors for next step
+        """
+        batch_size = proprio.shape[0]
+        
+        # Add sequence dimension S=1
+        proprio_seq = proprio.unsqueeze(1)  # [B, 1, feat_dim]
+        depth_seq = depth.unsqueeze(1)      # [B, 1, depth_hist_len, H, W]
+        
+        # Use forward_with_mems
+        actions_seq, new_mems = self.forward_with_mems(proprio_seq, depth_seq, mems=mems)
+        
+        # Remove sequence dimension
+        actions = actions_seq.squeeze(1)
+        print("debug: using mem in dagger.")  # [B, action_dim]
+        return actions, new_mems
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(

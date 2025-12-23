@@ -272,6 +272,8 @@ def main():
     timeout_hist = deque(maxlen=256)
     # TXL 记忆状态（按层存放），用于在线推理加速
     txl_mems = None
+    # TXL 训练记忆状态，用于 segment recurrence（跨 batch 保持记忆）
+    train_mems = None
 
     # ===== main training loop =====
     train_start_t = time.time()
@@ -301,8 +303,8 @@ def main():
             prop_batch = []
             depth_batch = []
             for i in range(args.num_envs):
-                prop_hist = list(aggregator.prop_histories[i])
-                depth_hist = list(aggregator.depth_histories[i])
+                prop_hist = list(aggregator.prop_history[i])
+                depth_hist = list(aggregator.depth_history[i])
                 # 将当前观测加入历史，避免“落后一拍”
                 prop_hist_plus = (prop_hist + [obs_prop_np[i]])[-aggregator.prop_hist_len :]
                 depth_hist_plus = (depth_hist + [depth_np[i]])[-aggregator.depth_hist_len :]
@@ -381,9 +383,27 @@ def main():
         proprio_t = torch.from_numpy(batch["proprio"]).float().to(device)
         depth_t = torch.from_numpy(batch["depth"]).float().to(device)
         teacher_t = torch.from_numpy(batch["actions"]).float().to(device)
+        dones_batch = batch["dones"]  # [B, S] numpy boolean
 
-        # 训练阶段：按完整序列前向，与离线监督训练保持一致
-        pred = student(proprio_t, depth_t)
+        # 训练阶段：使用 segment recurrence，传入上一段的 mems（已 detach）
+        # Detach previous segment's mems to stop gradient backprop
+        detached_mems = None
+        if train_mems is not None:
+            detached_mems = [m.detach() for m in train_mems]
+        
+        pred, new_train_mems = student.forward_with_mems(proprio_t, depth_t, mems=detached_mems)
+        
+        # 处理 done 环境：重置其 mems
+        # 如果该环境在此序列中有任何 done，则清零其 mems
+        any_done = dones_batch.any(axis=1)  # [B]
+        if new_train_mems is not None and any_done.any():
+            done_mask = torch.from_numpy(any_done).to(device)
+            for layer_mem in new_train_mems:
+                if layer_mem is not None and layer_mem.numel() > 0:
+                    layer_mem[done_mask] = 0.0
+        
+        train_mems = new_train_mems  # 保存给下一个 segment
+        
         loss = nn.functional.mse_loss(pred, teacher_t)
         # 监控标签与残差的幅值，便于判断 loss 量级
         with torch.no_grad():
