@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 import torch
+import torch.nn.functional as F
 
 
 def _ensure_repo_on_path() -> None:
@@ -57,15 +58,26 @@ def _parse_args() -> argparse.Namespace:
         help="Output directory (e.g., rl_sar/policy/go2/parkour_student_dagger).",
     )
     p.add_argument("--opset", type=int, default=17, help="ONNX opset version.")
+    p.add_argument(
+        "--depth_resize",
+        type=int,
+        default=64,
+        help=(
+            "在导出图中先把 depth 双线性 resize 到 NxN（默认 64），"
+            "用于规避 DepthEncoder 内部 adaptive_avg_pool2d 的 ONNX 不支持问题；"
+            "设为 0 表示不做 resize（可能导出失败）。"
+        ),
+    )
     p.add_argument("--verbose", action="store_true", default=False, help="Verbose ONNX export.")
     return p.parse_args()
 
 
 class _StudentMemsWrapper(torch.nn.Module):
-    def __init__(self, student: torch.nn.Module, num_layers: int) -> None:
+    def __init__(self, student: torch.nn.Module, num_layers: int, depth_resize: int) -> None:
         super().__init__()
         self.student = student
         self.num_layers = int(num_layers)
+        self.depth_resize = int(depth_resize)
 
     def forward(
         self,
@@ -73,6 +85,18 @@ class _StudentMemsWrapper(torch.nn.Module):
         depth: torch.Tensor,
         mems: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # NOTE:
+        # DepthEncoder 内部在 H/W 与 grid_size(=4) 不整除时会走 adaptive_avg_pool2d，
+        # 但 PyTorch 的 ONNX 导出仅支持“输出尺寸是输入尺寸因子”的 adaptive pooling。
+        # 因此这里先把 depth resize 到一个能让卷积输出变成 4x4 的固定尺寸（默认 64x64），
+        # 从而避免触发 adaptive_avg_pool2d 分支。
+        if self.depth_resize > 0:
+            depth = F.interpolate(
+                depth,
+                size=(self.depth_resize, self.depth_resize),
+                mode="bilinear",
+                align_corners=False,
+            )
         # mems: [B, L, M, C] -> list([B, M, C] * L)
         mem_list = [mems[:, i, :, :] for i in range(self.num_layers)]
         actions, new_mems = self.student.forward_step(proprio, depth, mems=mem_list)
@@ -157,7 +181,7 @@ def main() -> None:
 
     height, width = int(camera_resolution[0]), int(camera_resolution[1])
 
-    wrapper = _StudentMemsWrapper(student, num_layers=num_layers).eval()
+    wrapper = _StudentMemsWrapper(student, num_layers=num_layers, depth_resize=int(args.depth_resize)).eval()
 
     # fixed-shape dummy inputs for a single env (B=1)
     proprio = torch.zeros(1, prop_hist_len * num_prop, dtype=torch.float32)
@@ -170,6 +194,10 @@ def main() -> None:
     )
     print(f"[export] output file: {out_path}")
     print(f"[export] action_dim={action_dim}, num_layers={num_layers}, mem_len={mem_len}, token_dim={token_dim}")
+    if int(args.depth_resize) > 0:
+        print(f"[export] depth_resize={int(args.depth_resize)} (export graph will resize depth to {int(args.depth_resize)}x{int(args.depth_resize)})")
+    else:
+        print("[export] depth_resize=0 (no resize; export may fail if DepthEncoder uses adaptive_avg_pool2d)")
 
     # Export ONNX
     torch.onnx.export(
@@ -189,4 +217,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
