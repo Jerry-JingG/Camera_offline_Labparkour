@@ -269,11 +269,20 @@ def main():
     ep_lengths = np.zeros(args.num_envs, dtype=np.int64)
     ep_return_hist = deque(maxlen=256)
     ep_length_hist = deque(maxlen=256)
+    track_progress_hist = deque(maxlen=256)
     timeout_hist = deque(maxlen=256)
     # TXL 记忆状态（按层存放），用于在线推理加速
     txl_mems = None
     # TXL 训练记忆状态，用于 segment recurrence（跨 batch 保持记忆）
     train_mems = None
+
+    # 子地形目标信息（来自 base_parkour 事件）
+    try:
+        base_parkour = vec_env.unwrapped.parkour_manager.get_term("base_parkour")
+        num_goals = int(getattr(base_parkour, "num_goals", 0))
+    except Exception:
+        base_parkour = None
+        num_goals = None
 
     # ===== main training loop =====
     train_start_t = time.time()
@@ -320,6 +329,12 @@ def main():
                 actions_step, new_mems = student.forward_step(prop_step, depth_step, mems=txl_mems)
                 student_act = actions_step.cpu()
 
+            # 在环境 step 前缓存当前的 goal 索引（否则 step 内部 reset 后 cur_goal_idx 会被清零）
+            if base_parkour is not None and num_goals and num_goals > 0:
+                goal_idx_before_step = base_parkour.cur_goal_idx.detach().cpu().numpy().copy()
+            else:
+                goal_idx_before_step = None
+
             # --- env step (student acts) ---
             # 预热阶段：由 Teacher 推进环境；之后由 Student 推进（可选 mixture）
             if it < args.num_pretrain_iters:
@@ -355,6 +370,13 @@ def main():
             if len(done_indices) > 0:
                 ep_return_hist.extend(ep_returns[done_indices].tolist())
                 ep_length_hist.extend(ep_lengths[done_indices].tolist())
+
+                # ====== 赛道进度：仅基于本步前的 cur_goal_idx / num_goals ======
+                if goal_idx_before_step is not None and num_goals and num_goals > 0:
+                    goal_vals = np.array(goal_idx_before_step).reshape(-1)[done_indices]
+                    norm_progress = np.clip(goal_vals / float(num_goals), 0.0, 1.0)
+                    track_progress_hist.extend(norm_progress.tolist())
+
                 timeout_hist.extend(timeouts_np[done_indices].astype(int).tolist())
                 ep_returns[done_indices] = 0.0
                 ep_lengths[done_indices] = 0
@@ -454,6 +476,14 @@ def main():
                         "rollout/ep_return_std": float(np.std(ep_return_hist)),
                         "rollout/ep_len_mean": float(np.mean(ep_length_hist)),
                         "rollout/ep_len_std": float(np.std(ep_length_hist)),
+                    }
+                )
+            if len(track_progress_hist) > 0:
+                track_arr = np.array(track_progress_hist)
+                wandb_metrics.update(
+                    {
+                        "rollout/track_progress_mean": float(np.mean(track_arr)),
+                        "rollout/track_progress_late_ratio": float(np.mean(track_arr >= 0.7)),
                     }
                 )
             if len(timeout_hist) > 0:

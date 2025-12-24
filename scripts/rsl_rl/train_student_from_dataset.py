@@ -389,7 +389,7 @@ class MultiModalStudentPolicy(nn.Module):
         
         # Remove sequence dimension
         actions = actions_seq.squeeze(1)
-        print("debug: using mem in dagger.")  # [B, action_dim]
+        # print("debug: using mem in dagger.")  # [B, action_dim]
         return actions, new_mems
 
 
