@@ -95,7 +95,7 @@ class UnitreeGo2StudentParkourEnvCfg_EVAL(UnitreeGo2StudentParkourEnvCfg):
         self.events.randomize_rigid_body_com = None
         self.events.randomize_rigid_body_mass = None
         self.events.push_by_setting_velocity.interval_range_s = (6.,6.)
-        self.events.random_camera_position.params['rot_noise_range'] = {'pitch':(0, 1)}
+        self.events.random_camera_position.params['rot_noise_range'] = {'pitch':(-5, 5)}
         
         for key, sub_terrain in self.scene.terrain.terrain_generator.sub_terrains.items():
             if key in ['parkour_flat', 'parkour_demo']:

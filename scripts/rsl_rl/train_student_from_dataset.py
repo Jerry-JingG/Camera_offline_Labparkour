@@ -53,7 +53,11 @@ ProprioEncoder = load_symbol(MODULES_ROOT / "tokenizers" / "proprio_encoder.py",
 
 
 class SequenceAggregator:
-    """ Stateful Aggregator: 输出的是 [Num_Envs, Seq_Len, Features] 的整块 Batch """
+    """
+    [经过优化] 向量化版本：移除所有 Python for 循环，使用 Numpy 矩阵操作。
+    解决 GPU 等待 CPU 数据的问题。
+    Stateful Aggregator: 输出的是 [Num_Envs, Seq_Len, Features] 的整块 Batch
+    """
 
     def __init__(
         self,
@@ -68,93 +72,118 @@ class SequenceAggregator:
         self.prop_hist_len = prop_hist_len
         self.depth_hist_len = depth_hist_len
         self.sequence_len = sequence_len
-        self.prop_histories: List[Deque[np.ndarray]] = [
-            deque(maxlen=prop_hist_len) for _ in range(num_envs)
-        ]
-        self.depth_histories: List[Deque[np.ndarray]] = [
-            deque(maxlen=depth_hist_len) for _ in range(num_envs)
-        ]
-        self.prop_dim = num_prop
+        self.num_prop = num_prop
         self.depth_shape = depth_shape
+        
+        # 1. 历史 Buffer: 预分配内存，不再使用 deque
+        self.prop_history = np.zeros((num_envs, prop_hist_len, num_prop), dtype=np.float32)
+        # Depth cropping: remove bottom 2 rows, left/right 4 cols
+        # Original shape: (58, 87) -> Cropped shape: (56, 79)
+        self.cropped_depth_shape = (depth_shape[0] - 2, depth_shape[1] - 8)
+        self.depth_history = np.zeros((num_envs, depth_hist_len, *self.cropped_depth_shape), dtype=np.float32)
 
-        # 1. 初始化历史队列 (Deque) 并预填充 0
-        # 这样从第1步开始就能生成数据，不用等待 warm-up
-        for env_id in range(num_envs):
-            self._reset_env(env_id)
-
-        self.sequence_buffers: List[List[Dict[str, np.ndarray]]] = [[] for _ in range(num_envs)]
+        # 2. 序列 Buffer: 预分配内存
+        self.seq_prop = np.zeros((num_envs, sequence_len, prop_hist_len * num_prop), dtype=np.float32)
+        self.seq_depth = np.zeros((num_envs, sequence_len, depth_hist_len, *self.cropped_depth_shape), dtype=np.float32)
+        
+        self.seq_action = None 
+        self.seq_target_yaw = np.zeros((num_envs, sequence_len, 2), dtype=np.float32)
+        self.seq_done = np.zeros((num_envs, sequence_len), dtype=bool)
+        
+        self.current_seq_step = 0
 
     def reset(self) -> None:
-        for env_id in range(self.num_envs):
-            self._reset_env(env_id)
-            self.sequence_buffers[env_id] = []
+        self.prop_history.fill(0)
+        self.depth_history.fill(0)
+        self.current_seq_step = 0
 
     def push_step(self, obs_prop, depth_frame, teacher_actions, done):
         # 这个函数现在必须保证：
         # 1. 要么返回 None (数据不够)
         # 2. 要么返回一个完整的 Batch (包含所有 Envs 的数据)
 
-        batch_ready = False
-
-        for env_id in range(self.num_envs):
-            self.prop_histories[env_id].append(obs_prop[env_id])
-            self.depth_histories[env_id].append(depth_frame[env_id])
-
-            prop_stack = np.concatenate(list(self.prop_histories[env_id]), axis=0)
-            depth_stack = np.stack(list(self.depth_histories[env_id]), axis=0)
-
-            self.sequence_buffers[env_id].append({
-                "prop": prop_stack,
-                "depth": depth_stack,
-                "action": teacher_actions[env_id],
-                "done": done[env_id]  # 记录 Done 信号，对 Stateful 训练很重要
-            })
-
-            if len(self.sequence_buffers[env_id]) == self.sequence_len:
-                batch_ready = True
-
-            # 处理 Done (只清空 history，不清空 sequence_buffer, 否则输出维度会不匹配(输出的是一整个batch))
-            if done[env_id]:
-                self._reset_env(env_id)
-
-        if batch_ready:
-            return self._pack_batch()  # 返回整个 Batch
+        self.prop_history = np.roll(self.prop_history, -1, axis=1)
+        self.depth_history = np.roll(self.depth_history, -1, axis=1)
+        
+        # 填入最新数据
+        self.prop_history[:, -1, :] = obs_prop
+        
+        # Depth cropping and normalization logic
+        # Crop: [:, :-2, 4:-4]
+        cropped_depth = depth_frame[:, :-2, 4:-4]
+        # Normalize: (depth / max_dist) - 0.5 (Assume depth_frame is already float scaled)
+        # Note: If depth_frame is already processed by image_features, it might be normalized.
+        # Checking image_features in observations.py: it does (d/clip) - 0.5.
+        # But here we might receive raw or partially processed. 
+        # For simplicity and alignment, we assume input 'depth_frame' 
+        # is raw-ish (0-1 approx) or needs compatible cropping.
+        # If input came from TeacherDatasetStreamer, it's float/scale. 
+        # If input came from DAGGER 'depth_camera' term, it is ALREADY cropped & normalized 
+        # by 'image_features' class in observations.py!
+        # WAIT: 'image_features' in observations.py ALREADY does crop [:-2, 4:-4] and norm.
+        # So if we are in DAGGER, `depth_frame` passed here is already 56x79.
+        # BUT if we are in offline dataset, `depth` is 58x87.
+        # We need to handle both.
+        
+        if cropped_depth.shape[-2:] != self.cropped_depth_shape:
+             # If input is already cropped (DAGGER case), direct assign
+             # But dimension check is needed.
+             if depth_frame.shape[-2:] == self.cropped_depth_shape:
+                  self.depth_history[:, -1, :, :] = depth_frame
+             else:
+                  # Fallback or error?
+                  # For now, apply crop if shape matches original
+                  self.depth_history[:, -1, :, :] = cropped_depth
         else:
-            return None
+             self.depth_history[:, -1, :, :] = cropped_depth
+
+        # --- 2. 存入序列 Buffer ---
+        # Flatten Proprio: [Num_Envs, Hist_Len, Dim] -> [Num_Envs, Hist_Len * Dim]
+        current_prop_flat = self.prop_history.reshape(self.num_envs, -1)
+        
+        idx = self.current_seq_step
+        if self.seq_action is None:
+             self.seq_action = np.zeros((self.num_envs, self.sequence_len, teacher_actions.shape[-1]), dtype=np.float32)
+
+        self.seq_prop[:, idx] = current_prop_flat
+        self.seq_depth[:, idx] = self.depth_history 
+        self.seq_action[:, idx] = teacher_actions
+        # Extract target yaw from LAST step of proprio history
+        # indices 6 and 7 are delta_yaw and delta_next_yaw in ExtremeParkourObservations
+        self.seq_target_yaw[:, idx] = self.prop_history[:, -1, 6:8]
+        self.seq_done[:, idx] = done
+
+        # --- 3. 处理 Done (批量清零) ---
+        if np.any(done):
+            self.prop_history[done] = 0
+            self.depth_history[done] = 0
+
+        # --- 4. 检查 Batch 是否完成 ---
+        self.current_seq_step += 1
+        if self.current_seq_step == self.sequence_len:
+            batch = self._pack_batch()
+            self.current_seq_step = 0 
+            return batch
+        
+        return None
 
     def _pack_batch(self):
         """
         将 List[List[Dict]] 转换为 Numpy Batch
         Output Shape: [Num_Envs, Seq_Len, Features]
         """
-        prop_batch, depth_batch, action_batch, done_batch = [], [], [], []
-
-        for env_id in range(self.num_envs):
-            seq = self.sequence_buffers[env_id]
-            # Stack time dimension
-            prop_batch.append(np.stack([s["prop"] for s in seq]))
-            depth_batch.append(np.stack([s["depth"] for s in seq]))
-            action_batch.append(np.stack([s["action"] for s in seq]))
-            done_batch.append(np.stack([s["done"] for s in seq]))
-
-            # 关键：清空 buffer，实现非重叠
-            self.sequence_buffers[env_id] = []
-
         return {
-            "proprio": np.stack(prop_batch),  # [16, 64, 53*3]
-            "depth": np.stack(depth_batch),  # [16, 64, 4, H, W]
-            "actions": np.stack(action_batch),
-            "dones": np.stack(done_batch)    # [16, 64]
+            "proprio": self.seq_prop.copy(),
+            "depth": self.seq_depth.copy(),
+            "actions": self.seq_action.copy(),
+            "target_yaw": self.seq_target_yaw.copy(),
+            "dones": self.seq_done.copy()
         }
 
     def _reset_env(self, env_id: int) -> None:
-        self.prop_histories[env_id].clear()
-        self.depth_histories[env_id].clear()
-        # self.sequence_buffers[env_id].clear()
-        for _ in range(self.prop_hist_len):
-            self.prop_histories[env_id].append(np.zeros(self.prop_dim, dtype=np.float32))
-        for _ in range(self.depth_hist_len):
-            self.depth_histories[env_id].append(np.zeros(self.depth_shape, dtype=np.float32))
+        # 兼容旧接口，虽然现在是整体重置，但为了接口一致性保留
+        self.prop_history[env_id].fill(0)
+        self.depth_history[env_id].fill(0)
 
 
 class TeacherDatasetStreamer:
@@ -271,6 +300,7 @@ class MultiModalStudentPolicy(nn.Module):
             grid_size=fusion_cfg.get("grid_size", 4),
             dropout=fusion_cfg.get("depth_dropout", 0.1),
         )
+        self.yaw_head = nn.Linear(token_dim, 2)  # Auxiliary task: predict delta_yaw, delta_next_yaw
         self.fusion_transformer = MultiModalFusionTransformer(
             token_dim=token_dim,
             num_layers=fusion_cfg.get("num_layers", 2),
@@ -327,7 +357,53 @@ class MultiModalStudentPolicy(nn.Module):
             return_mems=False,
         )
         actions = self.action_head.forward_sequence(temporal_out)["mean"]
-        return actions
+        yaw_pred = self.yaw_head(temporal_out)
+        return actions, yaw_pred
+
+    def forward_with_mems(
+        self,
+        proprio_seq: Tensor,
+        depth_seq: Tensor,
+        mems: Optional[List[Tensor]] = None,
+    ) -> Tuple[Tensor, List[Tensor]]:
+        """
+        Forward pass with segment recurrence memory support.
+        
+        Args:
+            proprio_seq: Tensor[B, S, prop_hist_len * proprio_dim]
+            depth_seq: Tensor[B, S, depth_hist_len, H, W]
+            mems: Optional list of memory tensors from previous segment (should be detached)
+        
+        Returns:
+            actions: Predicted action means of shape [B, S, action_dim]
+            new_mems: List of new memory tensors for next segment
+        """
+        batch_size, seq_len, feat_dim = proprio_seq.shape
+        
+        # 1. Encode proprio and depth
+        prop_encoded = self.proprio_encoder(
+            proprio_seq.reshape(batch_size * seq_len, feat_dim)
+        )  # [B*S, 1, C]
+        depth_encoded = self.depth_encoder(
+            depth_seq.reshape(batch_size * seq_len, depth_seq.size(2), depth_seq.size(3), depth_seq.size(4))
+        )  # [B*S, T, C]
+        
+        # 2. Multi-modal fusion
+        fused = self.fusion_transformer(prop_encoded, depth_encoded)
+        fused_seq = fused["all_pooled"].reshape(batch_size, seq_len, -1)
+        
+        # 3. Temporal modeling with memory
+        temporal_out, new_mems = self.temporal_model(
+            fused_seq,
+            mems=mems,           # Pass previous segment's mems (should be detached by caller)
+            causal_mask=True,
+            return_mems=True,    # Return new mems for next segment
+        )
+        
+        # 4. Action head and Yaw head
+        actions = self.action_head.forward_sequence(temporal_out)["mean"]
+        yaw_pred = self.yaw_head(temporal_out)
+        return actions, yaw_pred, new_mems
 
     def forward_step(
         self,
@@ -351,24 +427,20 @@ class MultiModalStudentPolicy(nn.Module):
         if depth_step.dim() != 4:
             raise ValueError("depth_step must have shape [B, T, H, W].")
 
-        batch_size, feat_dim = proprio_step.shape
-        # [B, 1, C]
-        prop_encoded = self.proprio_encoder(proprio_step)
-        # [B, N_vis, C]
-        depth_encoded = self.depth_encoder(depth_step)
-        fused = self.fusion_transformer(prop_encoded, depth_encoded)
-        fused_step = fused["all_pooled"].unsqueeze(1)  # [B, 1, C]
-
-        temporal_out, new_mems = self.temporal_model(
-            fused_step,
-            mems=mems,
-            causal_mask=True,
-            return_mems=True,
-        )
-        # temporal_out: [B, 1, C] -> [B, 1, action_dim]
-        actions_seq = self.action_head.forward_sequence(temporal_out)["mean"]
-        actions_step = actions_seq[:, -1, :]
-        return actions_step, new_mems
+        batch_size = proprio_step.shape[0]
+        
+        # Add sequence dimension S=1
+        proprio_seq = proprio_step.unsqueeze(1)  # [B, 1, feat_dim]
+        depth_seq = depth_step.unsqueeze(1)      # [B, 1, depth_hist_len, H, W]
+        
+        # Use forward_with_mems
+        actions_seq, yaw_pred_seq, new_mems = self.forward_with_mems(proprio_seq, depth_seq, mems=mems)
+        
+        # Remove sequence dimension
+        actions_step = actions_seq.squeeze(1)
+        yaw_pred_step = yaw_pred_seq.squeeze(1)
+        # print("debug: using mem in dagger.")  # [B, action_dim]
+        return actions_step, yaw_pred_step, new_mems
 
 
 def parse_args() -> argparse.Namespace:
@@ -464,6 +536,7 @@ def save_checkpoint(
         "epoch": epoch,
         "global_step": global_step,
         "meta": meta,
+        # Save a sample of params to debug
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, path)
@@ -517,7 +590,9 @@ def run_training() -> None:
 
         # 直接迭代 Batch (无需再组装 samples)
         for batch_data in streamer.iter_batches(max_sequences=args.max_sequences_per_epoch):
-            loss = train_batch(model, optimizer, batch_data, device, args.grad_clip, streamer)
+            # TODO: Add segment recurrence support here for offline training if needed,
+            # but for now we focus on DAGGER which handles it explicitly.
+            loss = train_batch(model, optimizer, batch_data, device, args.grad_clip)
 
             running_loss += loss
             num_updates += 1
@@ -546,8 +621,24 @@ def train_batch(
     depth = torch.from_numpy(batch_data["depth"]).to(device)
     teacher_actions = torch.from_numpy(batch_data["actions"]).to(device)
 
-    predictions = model(proprio, depth)
-    loss = torch.nn.functional.mse_loss(predictions, teacher_actions)
+    # Note: For offline training, if we want segment recurrence, we need to handle mems.
+    # Current implementation uses forward() which uses mems=None.
+    # We leave this as is for offline training to avoid changing too much logic,
+    # as DAGGER is the priority.
+    predictions, yaw_pred = model(proprio, depth)
+    
+    # Action Loss
+    loss_actions = torch.nn.functional.mse_loss(predictions, teacher_actions)
+    
+    # Auxiliary Yaw Loss (if available in batch)
+    if "target_yaw" in batch_data:
+        target_yaw = torch.from_numpy(batch_data["target_yaw"]).to(device)
+        loss_yaw = torch.nn.functional.mse_loss(yaw_pred, target_yaw)
+    else:
+        loss_yaw = 0.0
+
+    loss = loss_actions + loss_yaw
+
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     if grad_clip > 0:
