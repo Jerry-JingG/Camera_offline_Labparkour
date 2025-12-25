@@ -149,8 +149,8 @@ class StudentOnlineRunner:
         self.prop_histories: List[deque] = [deque(maxlen=prop_hist_len) for _ in range(num_envs)]
         self.depth_histories: List[deque] = [deque(maxlen=depth_hist_len) for _ in range(num_envs)]
 
-        self.temporal_prop_buffers = [deque(maxlen=sequence_length) for _ in range(num_envs)]
-        self.temporal_depth_buffers = [deque(maxlen=sequence_length) for _ in range(num_envs)]
+        self.prop_seq_buffers = [deque(maxlen=sequence_length) for _ in range(num_envs)]
+        self.depth_seq_buffers = [deque(maxlen=sequence_length) for _ in range(num_envs)]
 
         self.reset()
 
@@ -159,8 +159,8 @@ class StudentOnlineRunner:
         for i in range(self.num_envs):
             self.prop_histories[i].clear()
             self.depth_histories[i].clear()
-            self.temporal_prop_buffers[i].clear()
-            self.temporal_depth_buffers[i].clear()
+            self.prop_seq_buffers[i].clear()
+            self.depth_seq_buffers[i].clear()
 
             for _ in range(self.prop_hist_len):
                 self.prop_histories[i].append(
@@ -179,8 +179,8 @@ class StudentOnlineRunner:
             if bool(done):
                 self.prop_histories[env_id].clear()
                 self.depth_histories[env_id].clear()
-                # self.temporal_prop_buffers[env_id].clear()
-                # self.temporal_depth_buffers[env_id].clear()
+                # self.prop_seq_buffers[env_id].clear()
+                # self.depth_seq_buffers[env_id].clear()
 
                 for _ in range(self.prop_hist_len):
                     self.prop_histories[env_id].append(
@@ -218,11 +218,11 @@ class StudentOnlineRunner:
             self.depth_histories[env_id].append(depth_image[env_id])
             prop_stack = torch.cat(list(self.prop_histories[env_id]), dim=0)
             depth_stack = torch.stack(list(self.depth_histories[env_id]), dim=0)
-            self.temporal_prop_buffers[env_id].append(prop_stack)
-            self.temporal_depth_buffers[env_id].append(depth_stack)
+            self.prop_seq_buffers[env_id].append(prop_stack)
+            self.depth_seq_buffers[env_id].append(depth_stack)
 
-            prop_seqs.append(torch.stack(list(self.temporal_prop_buffers[env_id]), dim=0))
-            depth_seqs.append(torch.stack(list(self.temporal_depth_buffers[env_id]), dim=0))
+            prop_seqs.append(torch.stack(list(self.prop_seq_buffers[env_id]), dim=0))
+            depth_seqs.append(torch.stack(list(self.depth_seq_buffers[env_id]), dim=0))
 
         prop_batch = torch.stack(prop_seqs)      # [B, S, P]
         depth_batch = torch.stack(depth_seqs)    # [B, S, D, H, W]
@@ -255,6 +255,7 @@ def parse_args_play() -> argparse.Namespace:
         help="Temporal sequence length S for the student TXL during play.",
     )
     parser.add_argument("--max_steps", type=int, default=2000, help="Maximum steps to run.")
+    parser.add_argument("--use_dropout", action="store_true", default=False, help="演示相机掉线任务")
 
     cli_args.add_rsl_rl_args(parser)
     AppLauncher.add_app_launcher_args(parser)
@@ -334,12 +335,31 @@ def main() -> None:
     )
     runner.reset()
 
+    from utils.dropout_manager import CameraDropoutManager
+    dropout_manager = None
+    if args.use_dropout:
+        step_dt = float(vec_env.unwrapped.step_dt)
+        dropout_manager = CameraDropoutManager(
+            num_envs=args.num_envs,
+            device=device,
+            dt=step_dt,
+            prob_start_offline=0.0,
+            online_duration_range=(2.0, 6.0),
+            offline_duration_range=(1.0, 3.0)
+        )
+        print("[Play] Camera Dropout Simulation: ENABLED")
+
     obs, extras = vec_env.get_observations()
+    dones_bool = torch.zeros(vec_env.num_envs, device=device, dtype=torch.bool)
     step = 0
     while simulation_app.is_running() and step < args.max_steps:
         depth_image = extras["observations"].get("depth_camera")
         if depth_image is None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
+
+        if dropout_manager:
+            dropout_manager.reset_env(dones_bool)
+            dropout_manager.update(depth_image)
 
         obs_prop = obs[:, :proprio_dim]
 
@@ -351,9 +371,9 @@ def main() -> None:
                 mean_norm = float("nan")
             print(f"[student_play] step={step} mean_action_norm={mean_norm:.6f}")
         obs_next, rews, dones, extras = vec_env.step(student_action)
-        done_mask = dones.squeeze(-1).bool()
-        if done_mask.any():
-            runner.reset_done(done_mask)
+        dones_bool = dones.squeeze(-1).bool()
+        if dones_bool.any():
+            runner.reset_done(dones_bool)
 
         obs = obs_next
         step += 1

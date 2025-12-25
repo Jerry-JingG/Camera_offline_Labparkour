@@ -27,7 +27,7 @@ from parkour_isaaclab.envs.mdp import events
 
 @configclass
 class ParkourTeacherCamSceneCfg(ParkourTeacherSceneCfg):
-    """在教师场景基础上添加深度相机资产，用于只读采集。"""
+    """在教师场景基础上添加深度相机资产, 用于只读采集。"""
 
     depth_camera = CAMERA_CFG
     depth_camera_usd = CAMERA_USD_CFG
@@ -44,7 +44,7 @@ class TeacherWithCameraObservationsCfg(TeacherObservationsCfg):
 
 @configclass
 class UnitreeGo2TeacherCamParkourEnvCfg(UnitreeGo2TeacherParkourEnvCfg):
-    """训练版：保持教师配置，只是提供额外的深度相机观测。"""
+    """训练版: 保持教师配置，只是提供额外的深度相机观测。"""
 
     scene: ParkourTeacherCamSceneCfg = ParkourTeacherCamSceneCfg(num_envs=6144, env_spacing=1.0)
     observations: TeacherWithCameraObservationsCfg = TeacherWithCameraObservationsCfg()
@@ -52,7 +52,7 @@ class UnitreeGo2TeacherCamParkourEnvCfg(UnitreeGo2TeacherParkourEnvCfg):
 
 @configclass
 class UnitreeGo2TeacherCamParkourEnvCfg_EVAL(UnitreeGo2TeacherParkourEnvCfg_EVAL):
-    """评估版：支持 GUI/调试，可选 256 并行环境。"""
+    """评估版: 支持 GUI/调试，可选 256 并行环境。"""
 
     scene: ParkourTeacherCamSceneCfg = ParkourTeacherCamSceneCfg(num_envs=256, env_spacing=1.0)
     observations: TeacherWithCameraObservationsCfg = TeacherWithCameraObservationsCfg()
@@ -60,7 +60,7 @@ class UnitreeGo2TeacherCamParkourEnvCfg_EVAL(UnitreeGo2TeacherParkourEnvCfg_EVAL
 
 @configclass
 class UnitreeGo2TeacherCamParkourEnvCfg_PLAY(UnitreeGo2TeacherParkourEnvCfg_PLAY):
-    """回放/数据采集版：默认 16 并行环境（可被 CLI 参数覆盖）。"""
+    """回放/数据采集版: 默认 16 并行环境（可被 CLI 参数覆盖）。"""
 
     scene: ParkourTeacherCamSceneCfg = ParkourTeacherCamSceneCfg(num_envs=16, env_spacing=1.0)
     observations: TeacherWithCameraObservationsCfg = TeacherWithCameraObservationsCfg()
@@ -68,7 +68,7 @@ class UnitreeGo2TeacherCamParkourEnvCfg_PLAY(UnitreeGo2TeacherParkourEnvCfg_PLAY
 
 @configclass
 class UnitreeGo2TeacherCamParkourEnvCfg_COLLECT(UnitreeGo2TeacherParkourEnvCfg_PLAY):
-    """数据采集配置：保留了域随机化项以拓宽数据集coverage"""
+    """扰动配置: 保留了域随机化项以拓宽数据集coverage"""
     scene: ParkourTeacherCamSceneCfg = ParkourTeacherCamSceneCfg(num_envs=16, env_spacing=1.0)
     observations: TeacherWithCameraObservationsCfg = TeacherWithCameraObservationsCfg()
 

@@ -153,6 +153,12 @@ class SequenceAggregator:
     def _reset_done(self, env_id: int) -> None:
         self.prop_histories[env_id].clear()
         self.depth_histories[env_id].clear()
+
+        """
+        在当前的实现中, 对于done掉的环境, 我不能对它的sequence_buffer做任何处理,
+        尽管这会导致: 刚刚done掉的环境, 在输出下一个动作时, 它的观测包含上一段的观测序列, 这可能会对当前的输出造成干扰
+        WHY??动脑筋想一想
+        """
         # self.sequence_buffers[env_id].clear()
         for _ in range(self.prop_hist_len):
             self.prop_histories[env_id].append(np.zeros(self.prop_dim, dtype=np.float32))
@@ -236,7 +242,7 @@ class TeacherDatasetStreamer:
 
     def _convert_depth(self, depth_np: np.ndarray) -> np.ndarray:
         if self.depth_dtype == "uint16":
-            depth_np = depth_np.astype(np.float32) / self.depth_scale
+            depth_np = (depth_np.astype(np.float32) / self.depth_scale) - 0.5
         else:
             depth_np = depth_np.astype(np.float32)
         return depth_np

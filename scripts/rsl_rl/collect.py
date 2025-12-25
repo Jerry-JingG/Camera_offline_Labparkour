@@ -26,6 +26,8 @@ env_i:  x0, ..., x_done_t, x_new_0, x_new_1, ..., xT   ← reset 后继续
 env_n: x0, x1, ...              ....              xT
 """
 
+""" 删除了depth_encoder相关的代码, depth_encoder是parkour的学生策略用的, 我们的transformerxl学生有自己的fusion encoder """
+
 import argparse
 import json
 import os
@@ -37,6 +39,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import torch
+import cv2
 
 from isaaclab.app import AppLauncher
 
@@ -61,10 +64,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--total_steps", type=int, required=True, help="需要采集的环境步数（单次 step 全部 env 同步计数）。")
     parser.add_argument("--shard_size", type=int, default=1024, help="每个数据分片包含的 step 数量。")
     parser.add_argument("--out", type=str, required=True, help="数据集输出目录。")
-    parser.add_argument("--depth-encoder-checkpoint", type=str, default=None, help="学生深度编码器权重路径（可选）。")
-    parser.add_argument("--latent-interval", type=int, default=5, help="深度编码器更新 latent 的步间隔。")
     parser.add_argument("--dataset-format", choices=["npz"], default="npz", help="数据写入格式，目前支持 npz。")
-    parser.add_argument("--depth-dtype", choices=["float32", "uint16"], default="uint16", help="深度图保存精度。")
+    parser.add_argument("--depth-dtype", choices=["float32", "uint16"], default="float32", help="深度图保存精度。")
     parser.add_argument("--depth-scale", type=float, default=1000.0, help="当 depth-dtype=uint16 时的缩放倍数。")
     parser.add_argument("--video", action="store_true", default=False, help="是否在采集时录制视频（仅用于调试）。")
     parser.add_argument("--video_length", type=int, default=500, help="视频长度。")
@@ -74,6 +75,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--noised_observation", action="store_true", default=False, help="教师模型的观测输入是否受到扰动")
     parser.add_argument("--noised_action", action="store_true", default=False, help="教师模型的动作输出是否受到扰动")
+    parser.add_argument("--debug_vis", action="store_true", default=False, help="开启深度图实时可视化窗口(仅显示前16个环境)")
+    parser.add_argument("--use_dropout", action="store_true", default=False, help="采集相机掉线任务的数据")
 
     cli_args.add_rsl_rl_args(parser)
     AppLauncher.add_app_launcher_args(parser)
@@ -92,7 +95,7 @@ class RunningStats:
             self.load_state(state)
 
     def update(self, batch: np.ndarray):
-        """使用批量样本（N, dim）更新统计量。"""
+        """使用批量样本 (N, dim) 更新统计量。"""
 
         if batch.size == 0:
             return
@@ -110,7 +113,7 @@ class RunningStats:
         self.count = total
 
     def load_state(self, state: Dict[str, object]):
-        """根据已有统计（mean/std/count）恢复内部状态。"""
+        """根据已有统计 (mean/std/coun) 恢复内部状态。"""
 
         count = int(state.get("count", 0))
         if count <= 0:
@@ -191,54 +194,14 @@ def convert_depth(depth_image: torch.Tensor, dtype: str, scale: float) -> np.nda
     depth_np = depth_image.cpu().numpy()
     if dtype == "float32":
         return depth_np.astype(np.float32)
-    scaled = np.clip(depth_np * scale, 0, np.iinfo(np.uint16).max)
+
+    # [修改] 针对归一化数据 [-0.5, 0.5] 的处理
+    # 先平移到 [0.0, 1.0]，再缩放
+    # 假设 scale=1000, 那么 0m -> 0, 2m -> 1000
+    # 掉线(-0.5) -> 0
+    depth_shifted = depth_np + 0.5  # 变回 [0, 1]
+    scaled = np.clip(depth_shifted * scale, 0, np.iinfo(np.uint16).max)
     return scaled.astype(np.uint16)
-
-
-def prepare_depth_encoder(
-    checkpoint_path: str | None,
-    estimator_cfg: dict,
-    policy_cfg,
-    device: torch.device,
-):
-    """根据可选的 checkpoint 构建学生深度编码器。"""
-
-    if checkpoint_path is None:
-        return None
-
-    from scripts.rsl_rl.modules.feature_extractors.depth_backbone import (  # noqa: WPS433
-        DepthOnlyFCBackbone58x87,
-        RecurrentDepthBackbone,
-    )
-
-    scan_output_dim = policy_cfg.scan_encoder_dims[-1]
-    backbone = DepthOnlyFCBackbone58x87(scan_output_dim)
-    depth_cfg = {"num_prop": estimator_cfg["num_prop"]}
-    depth_encoder = RecurrentDepthBackbone(backbone, depth_cfg).to(device)
-
-    state = torch.load(checkpoint_path, map_location=device)
-    if isinstance(state, dict):
-        if "depth_encoder_state_dict" in state:
-            depth_encoder.load_state_dict(state["depth_encoder_state_dict"])
-        elif "state_dict" in state:
-            depth_encoder.load_state_dict(state["state_dict"])
-        else:
-            depth_encoder.load_state_dict(state)
-    else:
-        depth_encoder.load_state_dict(state)
-    depth_encoder.eval()
-    return depth_encoder
-
-
-def reset_depth_hidden_states(depth_encoder, done_mask: torch.Tensor):
-    """对 Done 的环境通道清零隐藏状态，避免历史污染。"""
-
-    if depth_encoder is None:
-        return
-    if depth_encoder.hidden_states.shape[1] == 0:
-        return
-    if done_mask.any():
-        depth_encoder.hidden_states[:, done_mask, :] = 0
 
 
 def generate_proprio_noise(
@@ -386,15 +349,6 @@ def main():  # noqa: C901
     priv_start = num_prop + num_scan
     priv_end = priv_start + num_priv_explicit
 
-    # 可选加载学生深度编码器，便于在线生成 latent 与 yaw。
-    depth_encoder = prepare_depth_encoder(
-        args_cli.depth_encoder_checkpoint,
-        estimator_cfg,
-        agent_cfg.policy,
-        vec_env.device,
-    )
-    latent_interval = max(1, args_cli.latent_interval)
-
     # 获取首次观测，同时初始化 episode 相关计数器。
     obs, extras = vec_env.get_observations()
     episode_ids = torch.arange(vec_env.num_envs, device=vec_env.device, dtype=torch.long)
@@ -422,26 +376,26 @@ def main():  # noqa: C901
         vec_env.num_actions,
         state=extract_state_from_cache(stats_cache, "action", fallback_sample_count),
     )
-    depth_latent_initial = extract_state_from_cache(
-        stats_cache,
-        "depth_latent",
-        fallback_sample_count,
-    )
-    depth_latent_stats = (
-        RunningStats(32, state=depth_latent_initial)
-        if depth_encoder is not None
-        else None
+
+    from utils.dropout_manager import CameraDropoutManager
+    step_dt = float(vec_env.unwrapped.step_dt)
+    dropout_manager = CameraDropoutManager(
+        num_envs=args_cli.num_envs,
+        device=vec_env.device,
+        dt=step_dt,
+        prob_start_offline=0.00,
+        online_duration_range=(2.0, 10.0),
+        offline_duration_range=(1.0, 7.0)
     )
 
     total_steps = args_cli.total_steps
     total_iterations = 0
     progress_interval = max(1, total_steps // 50)
-    latent_cache = torch.zeros((vec_env.num_envs, 32), device=vec_env.device)
-    yaw_cache = torch.zeros((vec_env.num_envs, 2), device=vec_env.device)
 
     perturb_prob = 0.3  # 30% 的概率使用噪声动作
     noise_scale = 0.2
 
+    dones_bool = torch.zeros(vec_env.num_envs, device=vec_env.device, dtype=torch.bool)
     while total_iterations < total_steps:
         depth_image = extras["observations"].get("depth_camera")
         if depth_image is None:
@@ -460,7 +414,45 @@ def main():  # noqa: C901
                 obs[:, :num_prop] += (prop_noise * use_noise_mask.unsqueeze(-1))
                 mask_expanded = use_noise_mask.view(vec_env.num_envs, 1, 1)
                 depth_image += (depth_noise * mask_expanded)
-                depth_image = torch.clamp(depth_image, min=0.0)  # 深度图通常不能为负
+                """image_features的返回值经过了归一化, 范围是(-0.5, 0.5), 所以-0.5才表示深度为0!!!"""
+                depth_image = torch.clamp(depth_image, min=-0.5)
+
+        if args_cli.use_dropout:
+            dropout_manager.reset_env(dones_bool)
+            dropout_manager.update(depth_image)
+
+        if args_cli.debug_vis:
+            # 1. 准备数据: [16, H, W]
+            vis_tensor = depth_image[:16].detach().cpu()
+            if vis_tensor.ndim == 4:
+                vis_tensor = vis_tensor.squeeze(1)
+
+            depth_images_np = vis_tensor.numpy()
+
+            # 还原可视化: 原数据范围 [-0.5, 0.5]
+            # 加 0.5 变回 [0.0, 1.0] 区间，这样 0m=黑, max=白
+            depth_images_prep = []
+            for img in depth_images_np:
+                img_display = img + 0.5
+                depth_images_prep.append(img_display)
+
+            # 2. 拼接网格
+            rows = []
+            ncols = 4
+            for i in range(0, 16, ncols):
+                batch = depth_images_prep[i:i+ncols]
+                # Horizontal Stack
+                row = np.hstack(batch)
+                rows.append(row)
+
+            # Vertical Stack
+            grid_img = np.vstack(rows)
+
+            # 放大显示
+            grid_img = cv2.resize(grid_img, (0, 0), fx=3.0, fy=3.0, interpolation=cv2.INTER_NEAREST)
+
+            cv2.imshow("Collect Debug (Depth)", grid_img)
+            cv2.waitKey(1)
 
         obs_prop = obs[:, :num_prop]
         obs_prop_cpu = obs_prop.detach().cpu().numpy().astype(np.float32)
@@ -481,16 +473,6 @@ def main():  # noqa: C901
                 # 只对被选中的环境添加噪声
                 actions = actions + (noise * use_noise_mask.unsqueeze(-1))
 
-        if depth_encoder is not None:
-            if total_iterations % latent_interval == 0:
-                obs_student = obs[:, :num_prop].clone()
-                obs_student[:, 6:8] = 0
-                with torch.inference_mode():
-                    depth_out = depth_encoder(depth_image, obs_student)
-                depth_encoder.detach_hidden_states()
-                latent_cache = depth_out[:, :-2]
-                yaw_cache = depth_out[:, -2:]
-
         # 环境前进一步，返回新的观测、奖励与终止标记。
         obs_next, rews, dones, extras = vec_env.step(actions)
         rews_cpu = rews.detach().cpu().numpy().astype(np.float32)
@@ -506,14 +488,8 @@ def main():  # noqa: C901
         buffer["depth"].append(convert_depth(depth_image, args_cli.depth_dtype, args_cli.depth_scale))
         buffer["priv_estimate"].append(priv_est.detach().cpu().numpy().astype(np.float32))
 
-        if depth_encoder is not None:
-            buffer["depth_latent"].append(latent_cache.detach().cpu().numpy().astype(np.float32))
-            buffer["yaw"].append(yaw_cache.detach().cpu().numpy().astype(np.float32))
-
         obs_stats.update(obs_prop_cpu)
         action_stats.update(actions_cpu)
-        if depth_latent_stats is not None:
-            depth_latent_stats.update(latent_cache.detach().cpu().numpy())
 
         steps_in_buffer += 1
         total_iterations += 1
@@ -526,8 +502,8 @@ def main():  # noqa: C901
             new_ids = torch.arange(next_episode_id, next_episode_id + num_reset, device=vec_env.device)
             episode_ids[reset_mask] = new_ids
             next_episode_id += num_reset
-            reset_depth_hidden_states(depth_encoder, reset_mask)
-        episode_ids[~reset_mask] = episode_ids[~reset_mask]
+            # reset_depth_hidden_states(depth_encoder, reset_mask)
+        # episode_ids[~reset_mask] = episode_ids[~reset_mask]         ？？？？
 
         obs = obs_next
 
@@ -554,7 +530,6 @@ def main():  # noqa: C901
     stats_payload = {
         "obs_prop": obs_stats.finalize(),
         "action": action_stats.finalize(),
-        "depth_latent": depth_latent_stats.finalize() if depth_latent_stats else None,
     }
 
     stats_arrays = {
@@ -565,16 +540,6 @@ def main():  # noqa: C901
         "action_std": np.array(stats_payload["action"]["std"], dtype=np.float32),
         "action_count": np.array([stats_payload["action"]["count"]], dtype=np.int64),
     }
-    if stats_payload["depth_latent"]:
-        stats_arrays["depth_latent_mean"] = np.array(
-            stats_payload["depth_latent"]["mean"], dtype=np.float32
-        )
-        stats_arrays["depth_latent_std"] = np.array(
-            stats_payload["depth_latent"]["std"], dtype=np.float32
-        )
-        stats_arrays["depth_latent_count"] = np.array(
-            [stats_payload["depth_latent"]["count"]], dtype=np.int64
-        )
 
     np.savez(out_dir / "stats.npz", **stats_arrays)
 
@@ -590,8 +555,6 @@ def main():  # noqa: C901
         "dataset_format": args_cli.dataset_format,
         "depth_dtype": args_cli.depth_dtype,
         "depth_scale": args_cli.depth_scale,
-        "latent_interval": latent_interval,
-        "depth_encoder_checkpoint": args_cli.depth_encoder_checkpoint,
         "camera_resolution": list(camera_shape[-2:]),
         "step_dt": float(vec_env.unwrapped.step_dt),
         "fields": shard_files,

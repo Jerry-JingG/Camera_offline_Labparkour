@@ -26,10 +26,20 @@ import os
 import sys
 import time
 from pathlib import Path
+from collections import deque
 
 import numpy as np
 import torch
 from torch import nn, Tensor
+
+# Ensure project-local packages (parkour_isaaclab, parkour_tasks, etc.) are importable
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+PARKOUR_TASKS_ROOT = os.path.join(PROJECT_ROOT, "parkour_tasks")
+if PARKOUR_TASKS_ROOT not in sys.path:
+    sys.path.insert(0, PARKOUR_TASKS_ROOT)
 
 # === Import aggregator and student policy (same directory) ===
 from train_student_from_dataset import SequenceAggregator, MultiModalStudentPolicy
@@ -37,18 +47,40 @@ from train_student_from_dataset import SequenceAggregator, MultiModalStudentPoli
 
 # ====== Isaac Lab / task loading (same as collect.py) ======
 def load_env_and_teacher(args):
-    import gymnasium as gym
+    # 必须先实例化 AppLauncher / SimulationApp，再导入依赖 Omniverse 的模块
     from isaaclab.app import AppLauncher
+
+    app_launcher = AppLauncher(args)
+    simulation_app = app_launcher.app
+
+    import gymnasium as gym
+    # 触发 parkour_tasks 中 Gym 环境注册（包括 TeacherCam 任务）
+    import parkour_tasks  # noqa: F401
     from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
     from isaaclab_tasks.utils import parse_env_cfg
     import cli_args
     from modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
     from vecenv_wrapper import ParkourRslRlVecEnvWrapper
 
-    app_launcher = AppLauncher(args)
-    simulation_app = app_launcher.app
+    # 与 collect.py 保持一致：从 CLI 中读取 device / disable_fabric 参数
+    device_cli = getattr(args, "device", None)
+    disable_fabric = getattr(args, "disable_fabric", False)
+    env_cfg = parse_env_cfg(
+        args.task,
+        device=device_cli,
+        num_envs=args.num_envs,
+        use_fabric=not disable_fabric,
+    )
 
-    env_cfg = parse_env_cfg(args.task, device=None, num_envs=args.num_envs, use_fabric=True)
+    # Optionally turn off depth-camera debug visualization window (cv2.imshow).
+    if getattr(args, "disable_depth_debug_vis", False):
+        try:
+            depth_cam_cfg = env_cfg.observations.depth_camera.depth_cam
+            if "debug_vis" in depth_cam_cfg.params:
+                depth_cam_cfg.params["debug_vis"] = False
+                print("[INFO] Disabled depth camera debug_vis for DAGGER run.")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[WARN] Failed to disable depth debug_vis: {exc}")
     agent_cfg = cli_args.parse_rsl_rl_cfg(args.task, args)
 
     env = gym.make(args.task, cfg=env_cfg)
@@ -72,19 +104,75 @@ def parse_args():
     p.add_argument("--num_envs", type=int, default=16)
     p.add_argument("--teacher_checkpoint", type=str, required=True)
     p.add_argument("--student_checkpoint", type=str, default=None)
+    p.add_argument(
+        "--teacher_hist_encoding",
+        action="store_true",
+        help="If set, teacher uses historical encoding (hist_encoding=True) like train.py distillation; default False.",
+    )
 
-    p.add_argument("--device", type=str, default="cuda:0")
+    p.add_argument(
+        "--disable_depth_debug_vis",
+        action="store_true",
+        help="Disable cv2 depth camera debug window.",
+    )
+
     p.add_argument("--num_iters", type=int, default=2000)
 
     p.add_argument("--sequence_length", type=int, default=64)
     p.add_argument("--prop_hist_len", type=int, default=3)
     p.add_argument("--depth_hist_len", type=int, default=4)
+    p.add_argument(
+        "--num_pretrain_iters",
+        type=int,
+        default=0,
+        help="预热迭代次数：在这段迭代内由 Teacher 执行环境，学生只学习。",
+    )
+    p.add_argument(
+        "--teacher_mixture",
+        action="store_true",
+        help="开启后：在学生执行阶段，以概率 beta 让教师接管动作 (beta 会按迭代衰减)",
+    )
+    p.add_argument(
+        "--teacher_mixture_beta_start",
+        type=float,
+        default=0.6,
+        help="mixture 初始 teacher 概率 beta_start。",
+    )
+    p.add_argument(
+        "--teacher_mixture_beta_end",
+        type=float,
+        default=0.1,
+        help="mixture 最低 teacher 概率 beta_end。",
+    )
+    p.add_argument(
+        "--teacher_mixture_decay_iters",
+        type=int,
+        default=800,
+        help="从 beta_start 线性衰减到 beta_end 所需的迭代数。",
+    )
 
     p.add_argument("--learning_rate", type=float, default=3e-4)
     p.add_argument("--weight_decay", type=float, default=1e-4)
     p.add_argument("--grad_clip", type=float, default=1.0)
 
     p.add_argument("--save_dir", type=str, default="student_dagger_outputs")
+
+    # 追加 RSL-RL 相关参数（resume / logger 等），保持与 train.py 一致的 CLI 行为
+    try:
+        import cli_args  # type: ignore
+
+        cli_args.add_rsl_rl_args(p)
+    except ImportError:
+        pass
+
+    # 追加 IsaacLab AppLauncher 相关参数，以便支持 --headless / --enable_cameras 等 CLI 选项
+    try:
+        from isaaclab.app import AppLauncher  # type: ignore
+
+        AppLauncher.add_app_launcher_args(p)
+    except ImportError:
+        # 若未安装 IsaacLab，则忽略这些额外参数（主要用于本地测试脚本语法）
+        pass
 
     return p.parse_args()
 
@@ -93,6 +181,23 @@ def parse_args():
 def main():
     args = parse_args()
     device = torch.device(args.device)
+
+    # -------------------------- wandb setup (optional) --------------------------
+    use_wandb = False
+    wandb_run = None
+    if getattr(args, "logger", None) == "wandb":
+        try:
+            import wandb  # type: ignore
+        except ImportError:
+            print("[WARN] wandb selected but not installed; skipping wandb logging.")
+        else:
+            wandb_run = wandb.init(
+                project=getattr(args, "log_project_name", None) or "student-dagger",
+                name=getattr(args, "run_name", None),
+                config={k: v for k, v in vars(args).items() if k != "logger"},
+                reinit=True,
+            )
+            use_wandb = True
 
     # load env + teacher
     vec_env, teacher_policy, agent_cfg = load_env_and_teacher(args)
@@ -111,6 +216,16 @@ def main():
     # Isaac's agent config gives num_prop
     num_prop = int(agent_cfg.estimator.num_prop)
     action_dim = int(getattr(vec_env, "num_actions", obs.shape[1]))
+    # meta 信息用于与 dataset 训练保持一致的 checkpoint 结构
+    ckpt_meta = {
+        "num_prop": num_prop,
+        "action_dim": action_dim,
+        "camera_resolution": cam_res,
+        "prop_hist_len": args.prop_hist_len,
+        "depth_hist_len": args.depth_hist_len,
+        "sequence_length": args.sequence_length,
+        "task": args.task,
+    }
 
     # ===== Build Student Policy (same config as offline training) =====
     fusion_cfg = {"num_layers": 2, "num_heads": 4, "mlp_ratio": 2.0, "dropout": 0.1, "attn_dropout": 0.1, "grid_size": 4}
@@ -141,7 +256,7 @@ def main():
         prop_hist_len=args.prop_hist_len,
         depth_hist_len=args.depth_hist_len,
         sequence_len=args.sequence_length,
-        prop_dim=num_prop,
+        num_prop=num_prop,
         depth_shape=cam_res,
     )
 
@@ -149,11 +264,21 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
 
     global_step = 0
+    # Episode stats buffers for online logging
+    ep_returns = np.zeros(args.num_envs, dtype=np.float64)
+    ep_lengths = np.zeros(args.num_envs, dtype=np.int64)
+    ep_return_hist = deque(maxlen=256)
+    ep_length_hist = deque(maxlen=256)
+    timeout_hist = deque(maxlen=256)
+    # TXL 记忆状态（按层存放），用于在线推理加速
+    txl_mems = None
 
     # ===== main training loop =====
+    train_start_t = time.time()
     for it in range(args.num_iters):
         start_t = time.time()
         batch = None
+        episodes_this_iter = 0
 
         obs, extras = vec_env.get_observations()
         obs = obs.to(device)
@@ -164,9 +289,12 @@ def main():
             depth_np = extras["observations"]["depth_camera"].cpu().numpy()
 
             # --- teacher labels ---
+            # teacher_policy 是 OnPolicyRunnerWithExtractor.get_inference_policy 返回的可调用对象，
+            # 接口与 ActorCriticRMA.act_inference 对齐。
             with torch.no_grad():
-                teacher_actions = teacher_policy.act_inference(obs, hist_encoding=False, scandots_latent=None)
-            teacher_actions_np = teacher_actions.cpu().numpy()
+                teacher_actions = teacher_policy(obs, hist_encoding=args.teacher_hist_encoding)
+            teacher_actions_cpu = teacher_actions.cpu()
+            teacher_actions_np = teacher_actions_cpu.numpy()
 
             # --- student acting ---
             # build student input from its own histories (aggregator stores them)
@@ -175,25 +303,70 @@ def main():
             for i in range(args.num_envs):
                 prop_hist = list(aggregator.prop_histories[i])
                 depth_hist = list(aggregator.depth_histories[i])
-                prop_batch.append(np.concatenate(prop_hist, axis=0))
-                depth_batch.append(np.stack(depth_hist, axis=0))
+                # 将当前观测加入历史，避免“落后一拍”
+                prop_hist_plus = (prop_hist + [obs_prop_np[i]])[-aggregator.prop_hist_len :]
+                depth_hist_plus = (depth_hist + [depth_np[i]])[-aggregator.depth_hist_len :]
+                prop_batch.append(np.concatenate(prop_hist_plus, axis=0))  # [prop_hist_len * num_prop]
+                depth_batch.append(np.stack(depth_hist_plus, axis=0))      # [depth_hist_len, H, W]
 
-            prop_t = torch.from_numpy(np.stack(prop_batch)).float().to(device).unsqueeze(1)
-            depth_t = torch.from_numpy(np.stack(depth_batch)).float().to(device).unsqueeze(1)
+            prop_step = torch.from_numpy(np.stack(prop_batch)).float().to(device)
+            depth_step = torch.from_numpy(np.stack(depth_batch)).float().to(device)
 
+            # TXL 单步推理：使用记忆状态 txl_mems
             student.eval()
             with torch.no_grad():
-                pred_actions, _ = student(prop_t, depth_t, mems=None)
-                student_act = pred_actions[:, -1, :].cpu()
+                actions_step, new_mems = student.forward_step(prop_step, depth_step, mems=txl_mems)
+                student_act = actions_step.cpu()
 
             # --- env step (student acts) ---
-            obs, rewards, dones, infos = vec_env.step(student_act.to(vec_env.device))
+            # 预热阶段：由 Teacher 推进环境；之后由 Student 推进（可选 mixture）
+            if it < args.num_pretrain_iters:
+                act_to_env = teacher_actions_cpu
+            else:
+                act_to_env = student_act
+                if args.teacher_mixture:
+                    progress = max(it - args.num_pretrain_iters, 0)
+                    decay = max(args.teacher_mixture_decay_iters, 1)
+                    mix_frac = min(progress / decay, 1.0)
+                    beta = args.teacher_mixture_beta_start + (args.teacher_mixture_beta_end - args.teacher_mixture_beta_start) * mix_frac
+                    beta = float(np.clip(beta, 0.0, 1.0))
+                    mask = (torch.rand(args.num_envs) < beta).unsqueeze(-1)
+                    act_to_env = torch.where(mask, teacher_actions_cpu, student_act)
+
+            obs, rewards, dones, infos = vec_env.step(act_to_env.to(vec_env.device))
             obs = obs.to(device)
 
             if "observations" in infos:
                 extras = infos
+            # 记录 episode 级指标
+            rewards_np = rewards.squeeze(-1).cpu().numpy()
+            ep_returns += rewards_np
+            ep_lengths += 1
 
-            dones_np = dones.cpu().numpy().astype(bool)
+            dones_np = dones.cpu().numpy().astype(bool).reshape(-1)
+            if isinstance(extras, dict) and "time_outs" in extras:
+                timeouts_np = extras["time_outs"].cpu().numpy().astype(bool).reshape(-1)
+            else:
+                timeouts_np = np.zeros_like(dones_np, dtype=bool)
+
+            done_indices = np.nonzero(dones_np)[0]
+            if len(done_indices) > 0:
+                ep_return_hist.extend(ep_returns[done_indices].tolist())
+                ep_length_hist.extend(ep_lengths[done_indices].tolist())
+                timeout_hist.extend(timeouts_np[done_indices].astype(int).tolist())
+                ep_returns[done_indices] = 0.0
+                ep_lengths[done_indices] = 0
+                episodes_this_iter += len(done_indices)
+
+            # 更新 TXL 记忆：对已经 done 的环境清零对应的 memory
+            if new_mems is not None:
+                done_mask = torch.from_numpy(dones_np).to(device)
+                for i, mem in enumerate(new_mems):
+                    if mem is None or mem.numel() == 0:
+                        continue
+                    # mem: [B, M, C]，将 done 的 env 的历史置零
+                    mem[done_mask] = 0.0
+                txl_mems = new_mems
 
             # --- push to aggregator ---
             batch = aggregator.push_step(
@@ -209,8 +382,15 @@ def main():
         depth_t = torch.from_numpy(batch["depth"]).float().to(device)
         teacher_t = torch.from_numpy(batch["actions"]).float().to(device)
 
-        pred, _ = student(proprio_t, depth_t, mems=None)
+        # 训练阶段：按完整序列前向，与离线监督训练保持一致
+        pred = student(proprio_t, depth_t)
         loss = nn.functional.mse_loss(pred, teacher_t)
+        # 监控标签与残差的幅值，便于判断 loss 量级
+        with torch.no_grad():
+            teacher_rms = torch.sqrt(torch.mean(teacher_t ** 2)).item()
+            diff_rmse = torch.sqrt(torch.mean((pred - teacher_t) ** 2)).item()
+            teacher_abs_max = torch.max(torch.abs(teacher_t)).item()
+            rel_rmse = diff_rmse / (teacher_rms + 1e-8)
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -219,7 +399,47 @@ def main():
 
         global_step += 1
 
-        print(f"[iter {it}] loss={loss.item():.5f}   time={time.time()-start_t:.2f}s   global_step={global_step}")
+        iter_time = time.time() - start_t
+        elapsed = time.time() - train_start_t
+        avg_iter_time = elapsed / (it + 1)
+        remaining_iters = args.num_iters - it - 1
+        eta_seconds = remaining_iters * avg_iter_time
+        eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
+        # throughput: steps per second
+        steps_per_iter = args.num_envs * args.sequence_length
+        steps_per_sec = steps_per_iter / iter_time if iter_time > 0 else 0.0
+
+        print(
+            f"[iter {it}] loss={loss.item():.5f}   time={iter_time:.2f}s   eta={eta_str}   steps/s={steps_per_sec:.2f}   global_step={global_step}"
+        )
+
+        # wandb logging
+        if use_wandb:
+            wandb_metrics = {
+                "train/loss": loss.item(),
+                "time/iter_s": iter_time,
+                "time/eta_s": eta_seconds,
+                "time/elapsed_s": elapsed,
+                "perf/steps_per_s": steps_per_sec,
+                "rollout/episodes_this_iter": episodes_this_iter,
+                "teacher/action_rms": teacher_rms,
+                "teacher/action_abs_max": teacher_abs_max,
+                "train/diff_rmse": diff_rmse,
+                "train/rel_rmse": rel_rmse,
+            }
+            if len(ep_return_hist) > 0:
+                wandb_metrics.update(
+                    {
+                        "rollout/ep_return_mean": float(np.mean(ep_return_hist)),
+                        "rollout/ep_return_std": float(np.std(ep_return_hist)),
+                        "rollout/ep_len_mean": float(np.mean(ep_length_hist)),
+                        "rollout/ep_len_std": float(np.std(ep_length_hist)),
+                    }
+                )
+            if len(timeout_hist) > 0:
+                timeout_rate = float(np.mean(timeout_hist))
+                wandb_metrics["rollout/timeout_rate"] = timeout_rate
+            wandb.log(wandb_metrics, step=global_step)
 
         # save
         if (it + 1) % 100 == 0:
@@ -228,13 +448,24 @@ def main():
                 "optimizer_state_dict": optimizer.state_dict(),
                 "iter": it,
                 "global_step": global_step,
+                "meta": ckpt_meta,
             }
-            torch.save(ckpt, save_dir / f"student_dagger_{it+1:06d}.pt")
-            print(f"[save] {save_dir / f'student_dagger_{it+1:06d}.pt'}")
+            ckpt_path = save_dir / f"student_epoch_{it+1:06d}.pt"
+            torch.save(ckpt, ckpt_path)
+            print(f"[save] {ckpt_path}")
 
     # final save
-    torch.save({"model_state_dict": student.state_dict()}, save_dir / "student_dagger_final.pt")
+    final_ckpt = {
+        "model_state_dict": student.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "iter": args.num_iters,
+        "global_step": global_step,
+        "meta": ckpt_meta,
+    }
+    torch.save(final_ckpt, save_dir / "student_epoch_final.pt")
     print("[done] training finished.")
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

@@ -14,9 +14,8 @@ NUM_ENVS=64                                                    # --num_envs：�
 TOTAL_STEPS=5120                                               # --total_steps：总采集步数（一次 step 全部 env 同步计数）
 SHARD_SIZE=1024                                                # --shard_size：每个数据分片包含的 step 数
 
-OUTPUT_DIR="outputs/datasets/teacher_cam/collection_clean1"                      # --out：数据输出目录
+OUTPUT_DIR="outputs/datasets/teacher_cam/offline_collection1"                      # --out：数据输出目录
 DEPTH_ENCODER_CKPT=""                                          # --depth-encoder-checkpoint：学生深度编码器权重（可为空）
-LATENT_INTERVAL=5                                              # --latent-interval：深度 latent 更新间隔
 DATASET_FORMAT="npz"                                           # --dataset-format：数据格式，目前仅支持 npz
 DEPTH_DTYPE="float32"                                          # --depth-dtype：深度图保存精度（float32 或 uint16）
 DEPTH_SCALE=1000.0                                             # --depth-scale：当保存为 uint16 时的缩放倍数
@@ -26,6 +25,9 @@ REALTIME_FLAG=false                                            # --real-time：�
 USE_PRETRAINED_FLAG=false                                      # --use_pretrained_checkpoint：是否改用官方预训练模型
 CHECKPOINT_PATH="logs/rsl_rl/unitree_go2_parkour/251114_ckpt/model_49999.pt"  # --checkpoint：本地 checkpoint 路径
 RESUME_DATASET_FLAG=false                                      # --resume_dataset：若目录存在是否继续追加采集
+
+DEBUG_VIS=true                                                 # --debug_vis：开启深度图实时可视化窗口(仅显示前16个环境)
+USE_DROPOUT=true                                               # --use_dropout：采集相机掉线任务的数据
 
 # ------------------------------- RSL-RL 额外参数 --------------------------------
 # 示例：RSL_RL_ARGS=("--seed" "123" "--run_name" "collect_debug")
@@ -88,15 +90,18 @@ COLLECT_CMD=("${PYTHON_BIN}" "scripts/rsl_rl/collect.py"
     "--total_steps" "${TOTAL_STEPS}"
     "--shard_size" "${SHARD_SIZE}"
     "--out" "${OUTPUT_DIR}"
-    "--latent-interval" "${LATENT_INTERVAL}"
     "--dataset-format" "${DATASET_FORMAT}"
     "--depth-dtype" "${DEPTH_DTYPE}"
     "--depth-scale" "${DEPTH_SCALE}"
     "--video_length" "${VIDEO_LENGTH}"
 )
 
-if [[ -n "${DEPTH_ENCODER_CKPT}" ]]; then
-    COLLECT_CMD+=("--depth-encoder-checkpoint" "${DEPTH_ENCODER_CKPT}")
+if [[ -n "${DEBUG_VIS}" ]]; then
+    COLLECT_CMD+=("--debug_vis")
+fi
+
+if [[ -n "${USE_DROPOUT}" ]]; then
+    COLLECT_CMD+=("--use_dropout")
 fi
 
 if [[ -n "${CHECKPOINT_PATH}" ]]; then

@@ -40,3 +40,13 @@ commit8：
 这是不合理的，学生策略应该在第一步就能输出动作
 现在的play_student和train_student_from_dataset都在prop_histories和depth_histories初始化时将prop_histories和depth_histories置零，这样在第一步就可以输出
 由于现在的play_student和train_student_from_dataset逻辑是绑定的，最好先用我的train_student_from_dataset训一版再play
+
+commit9&10:
+深度图精度修剪逻辑存在问题，bug的原因是image_features返回的深度图观测是经过了归一化的，范围是 (-0.5, 0.5) 对应真实深度 (0, 2)
+旧版的深度图压缩逻辑会将0米到1米范围内的障碍物数据将全部丢失（变成0），掉线产生的 -0.5 也会变成 0。学生模型将无法区分“1米处的障碍”和“贴脸的墙/掉线”
+该问题现已修复，但依然建议使用float32精度
+
+在collect.py中，删除了depth_encoder相关的代码, depth_encoder是parkour的学生策略用的, 我们的transformerxl学生有自己的fusion encoder
+
+在collect与play_student中都添加了相机掉线任务，并在collect.py中添加了深度图可视化逻辑
+现在问题是训练效果不太好，应该是加了掉线之后任务比较难，需要增大数据量与训练时间
