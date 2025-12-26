@@ -27,6 +27,8 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
+from utils.dropout_manager import CameraDropoutManager
+
 # Ensure repo roots are importable
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 MODULES_ROOT = Path(PROJECT_ROOT) / "parkour_tasks" / "parkour_tasks" / "extreme_parkour_task" / "modules"
@@ -178,6 +180,7 @@ class TeacherDatasetStreamer:
         sequence_len: int,
         prop_hist_len: int,
         depth_hist_len: int,
+        use_dropout: bool
     ) -> None:
         self.dataset_dir = dataset_dir
         self.meta = self._load_meta(dataset_dir)
@@ -198,6 +201,19 @@ class TeacherDatasetStreamer:
             depth_hist_len=depth_hist_len,
             sequence_len=sequence_len,
         )
+        self.dropout_manager = None
+        if use_dropout:
+            print("[Streamer] Training-time Camera Dropout Augmentation: ENABLED")
+            dt = float(self.meta.get("step_dt", 0.02))
+            # 我们使用 CPU 版本的 tensor 进行增强，因为 dataloader 运行在 CPU 上
+            self.dropout_manager = CameraDropoutManager(
+                num_envs=self.num_envs,
+                device=torch.device("cpu"),
+                dt=dt,
+                prob_start_offline=0.05,
+                online_duration_range=(2.0, 20.0),
+                offline_duration_range=(1.0, 10.0)
+            )
 
     @staticmethod
     def _load_meta(dataset_dir: Path) -> Dict[str, object]:
@@ -212,6 +228,7 @@ class TeacherDatasetStreamer:
         self.aggregator.reset()
         batches_yielded = 0
 
+        prev_dones = torch.zeros(self.num_envs, dtype=torch.bool)
         for shard_path in self.shards:
             with np.load(shard_path, allow_pickle=False) as shard:
                 obs_prop = shard["obs_prop"].astype(np.float32)
@@ -222,6 +239,15 @@ class TeacherDatasetStreamer:
 
                 for step_idx in range(num_steps):
                     depth_frame = self._convert_depth(depth[step_idx])
+
+                    if self.dropout_manager is not None:
+                        self.dropout_manager.reset_env(prev_dones)
+                        depth_tensor = torch.from_numpy(depth_frame)
+                        self.dropout_manager.update(depth_tensor)
+                        depth_frame = depth_tensor.numpy()
+
+                    prev_dones = torch.from_numpy(dones[step_idx].reshape(-1))
+
                     # Push step and check if a batch is ready
                     batch_data = self.aggregator.push_step(
                         obs_prop=obs_prop[step_idx],
@@ -360,6 +386,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_sequences_per_epoch", type=int, default=None, help="Optional cap on sequences per epoch.")
     parser.add_argument("--save_dir", type=str, default=None, help="Directory to store checkpoints (defaults to dataset dir).")
     # parser.add_argument("--resume", type=str, default=None)  已被student_checkpoint代替
+
+    parser.add_argument("--use_dropout", action="store_true", default=False, help="在训练时添加随机相机掉线")
+
     return parser.parse_args()
 
 
@@ -463,6 +492,7 @@ def run_training() -> None:
         sequence_len=args.sequence_length,
         prop_hist_len=args.prop_hist_len,
         depth_hist_len=args.depth_hist_len,
+        use_dropout=args.use_dropout
     )
     model, _ = build_student_from_dataset(streamer, args.prop_hist_len, args.depth_hist_len)
     device = torch.device(args.device)

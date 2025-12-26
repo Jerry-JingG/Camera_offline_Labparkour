@@ -83,8 +83,11 @@ class CameraDropoutManager:
 
     def reset_env(self, dones_mask: torch.Tensor):
         """
-        [关键逻辑] 当环境 Done 时调用。
-        强制将重置的环境恢复为 Online 状态，并重新采样倒计时。
+        Step T: 采取动作，环境返回 obs_{T+1} 和 done_T。
+        Start of Loop (T+1):
+        检查 done_T。如果为 True, 说明 obs_{T+1} 是一个新 Episode 的初始帧。
+        调用 reset_env(done_T)：强制相机恢复在线 (为了新 Episode)。
+        调用 update(obs_{T+1})：对这帧新图像应用掉线逻辑。
         """
         if not dones_mask.any():
             return

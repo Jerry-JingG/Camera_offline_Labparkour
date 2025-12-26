@@ -27,7 +27,7 @@ CHECKPOINT_PATH="logs/rsl_rl/unitree_go2_parkour/251114_ckpt/model_49999.pt"  # 
 RESUME_DATASET_FLAG=false                                      # --resume_dataset：若目录存在是否继续追加采集
 
 DEBUG_VIS=true                                                 # --debug_vis：开启深度图实时可视化窗口(仅显示前16个环境)
-USE_DROPOUT=true                                               # --use_dropout：采集相机掉线任务的数据
+USE_DROPOUT=false                                               # --use_dropout：采集相机掉线任务的数据
 
 # ------------------------------- RSL-RL 额外参数 --------------------------------
 # 示例：RSL_RL_ARGS=("--seed" "123" "--run_name" "collect_debug")

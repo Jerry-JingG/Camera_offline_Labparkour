@@ -344,8 +344,8 @@ def main() -> None:
             device=device,
             dt=step_dt,
             prob_start_offline=0.0,
-            online_duration_range=(2.0, 6.0),
-            offline_duration_range=(1.0, 3.0)
+            online_duration_range=(5.0, 5.0),
+            offline_duration_range=(2.0, 2.0)
         )
         print("[Play] Camera Dropout Simulation: ENABLED")
 

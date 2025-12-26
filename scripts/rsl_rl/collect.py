@@ -21,7 +21,7 @@ collect.py 收集的数据格式是：
 env_0: x0, x1, ...              ....              xT
 env_1: x0, x1, ...              ....              xT
 ...
-env_i:  x0, ..., x_done_t, x_new_0, x_new_1, ..., xT   ← reset 后继续
+env_i: x0, ..., x_done_t, x_new_0, x_new_1,  ..., xT   ← reset 后继续
 ...
 env_n: x0, x1, ...              ....              xT
 """
