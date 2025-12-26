@@ -161,6 +161,8 @@ class StudentOnlineRunner:
         self.prop_histories: List[deque] = [deque(maxlen=prop_hist_len) for _ in range(num_envs)]
         self.depth_histories: List[deque] = [deque(maxlen=depth_hist_len) for _ in range(num_envs)]
         self.mems: List[torch.Tensor] | None = None
+        # Closed-loop yaw injection buffer
+        self.last_yaw_pred = torch.zeros((num_envs, 2), device=device, dtype=torch.float32)
         self.reset()
 
     def reset(self) -> None:
@@ -173,6 +175,7 @@ class StudentOnlineRunner:
             for _ in range(self.depth_hist_len):
                 self.depth_histories[env_id].append(torch.zeros(*self.camera_resolution, device=self.device))
         self.mems = None
+        self.last_yaw_pred.zero_()
 
     def reset_done(self, done_mask: torch.Tensor) -> None:
         """Clear histories and TXL mems for envs that are done."""
@@ -190,6 +193,10 @@ class StudentOnlineRunner:
                 if mem is None or mem.numel() == 0:
                     continue
                 mem[done_mask] = 0.0
+        
+        # Reset last_yaw_pred for done envs
+        if isinstance(done_mask, torch.Tensor):
+             self.last_yaw_pred[done_mask] = 0.0
 
     def act(self, obs_prop: torch.Tensor, depth_image: torch.Tensor) -> torch.Tensor:
         obs_prop = obs_prop.to(self.device)
@@ -201,7 +208,13 @@ class StudentOnlineRunner:
             depth_image = depth_image.squeeze(1)
 
         for env_id in range(self.num_envs):
-            self.prop_histories[env_id].append(obs_prop[env_id])
+            # Mask and Inject BEFORE appending to history
+            # This ensures the history buffer consistently contains "what the agent saw" (closed-loop)
+            cur_obs = obs_prop[env_id].clone()
+            cur_obs[6:8] = 0.0 # Mask true
+            cur_obs[6:8] = self.last_yaw_pred[env_id] # Inject pred
+            
+            self.prop_histories[env_id].append(cur_obs)
             self.depth_histories[env_id].append(depth_image[env_id])
 
         prop_batch = []
@@ -215,9 +228,61 @@ class StudentOnlineRunner:
         prop_batch_t = torch.stack(prop_batch)  # [B, prop_hist_len * proprio_dim]
         depth_batch_t = torch.stack(depth_batch)  # [B, depth_hist_len, H, W]
 
+        # Apply Closed-Loop Logic to the LATEST step in the history
+        # prop_batch_t shape: [B, H*D]. We need to modify the last D elements.
+        # But wait, prop_batch_t is flattened history.
+        # The history construction above appends the raw 'obs_prop' which contains true yaw (maybe).
+        # We need to mask it AND inject, similar to training.
+        
+        # Actually, simpler: Mask and inject BEFORE appending to history.
+        # But 'act' receives 'obs_prop' which is tensor.
+        # Let's modify 'obs_prop' before appending.
+        
+        # [CRITICAL] Mask True Yaw and Inject Predicted Yaw
+        # Cloning to avoid side-effects if obs_prop is reused outside
+        obs_prop_injected = obs_prop.clone()
+        obs_prop_injected[:, 6:8] = 0.0  # Mask true yaw
+        obs_prop_injected[:, 6:8] = self.last_yaw_pred  # Inject previous prediction
+        
+        # Update history with INJECTED obs
+        # Note: We must pop the old incorrect ones if we appended before, but here we construct fresh.
+        # My previous code appended 'obs_prop' (raw). We should append 'obs_prop_injected'.
+        # Let's fix the appending loop above.
+        
+        # Re-doing the append logic here for clarity (replacing the original loop in this chunk if possible, 
+        # but the tool chunk is small. I will modify the 'for env_id' loop completely).
+        # Wait, I can't easily jump back to line 203 in this chunk.
+        # I will modify the input `prop_batch_t` directly.
+        
+        # prop_batch_t is [B, Hist*Dim]. The last 'Dim' elements are the current step.
+        # We need to modify indices corresponding to 6:8 in the LAST step.
+        # stride = proprio_dim.
+        # indices = (Hist-1)*Dim + [6, 7]
+        
+        bs = prop_batch_t.shape[0]
+        dim = self.proprio_dim
+        # Reshape to [B, Hist, Dim] to easily touch the last step
+        prop_reshaped = prop_batch_t.view(bs, self.prop_hist_len, dim)
+        
+        # Modify the last step in the history stack
+        # (This is safe because prop_batch_t is created from 'stack', so it's a new tensor)
+        # However, 'self.prop_histories' already got the RAW obs pushed in lines 203-205.
+        # This means the history buffer contains RAW obs. 
+        # In Recurrent/TXL, history should consistently be what the agent "saw".
+        # If we injected at step t, step t+1's history should contain the injected value of step t.
+        # So we SHOULD modify what goes into `self.prop_histories`.
+
+        # Refactoring approach for this tool call:
+        # I can't edit lines 203-205 easily in this chunk without making it huge.
+        # I will perform the replacement on the WHOLE `act` method to be safe and clean.
+        pass # placeholder for thought process
+        
         with torch.no_grad():
-            actions_step, new_mems = self.model.forward_step(prop_batch_t, depth_batch_t, mems=self.mems)
+             # Fix unpacking: actions, yaw_pred, new_mems
+            actions_step, yaw_pred, new_mems = self.model.forward_step(prop_batch_t, depth_batch_t, mems=self.mems)
+        
         self.mems = new_mems
+        self.last_yaw_pred = yaw_pred.detach()
         return actions_step
 
 

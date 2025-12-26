@@ -348,8 +348,8 @@ def main():
             # Depth
             curr_depth_hist = aggregator.depth_history.copy()
             curr_depth_hist = np.roll(curr_depth_hist, -1, axis=1)
-            # Apply same cropping as SequenceAggregator [:, :-2, 4:-4]
-            curr_depth_hist[:, -1, :, :] = depth_np[:, :-2, 4:-4]
+            # Depth: use original shape (58x87) without cropping, matching train.py distillation
+            curr_depth_hist[:, -1, :, :] = depth_np
 
             # Flatten Proprio: [N, H, D] -> [N, H*D]
             prop_flat = curr_prop_hist.reshape(args.num_envs, -1)

@@ -77,14 +77,12 @@ class SequenceAggregator:
         
         # 1. 历史 Buffer: 预分配内存，不再使用 deque
         self.prop_history = np.zeros((num_envs, prop_hist_len, num_prop), dtype=np.float32)
-        # Depth cropping: remove bottom 2 rows, left/right 4 cols
-        # Original shape: (58, 87) -> Cropped shape: (56, 79)
-        self.cropped_depth_shape = (depth_shape[0] - 2, depth_shape[1] - 8)
-        self.depth_history = np.zeros((num_envs, depth_hist_len, *self.cropped_depth_shape), dtype=np.float32)
+        # Use original depth shape (58x87) without cropping, matching train.py distillation
+        self.depth_history = np.zeros((num_envs, depth_hist_len, *depth_shape), dtype=np.float32)
 
         # 2. 序列 Buffer: 预分配内存
         self.seq_prop = np.zeros((num_envs, sequence_len, prop_hist_len * num_prop), dtype=np.float32)
-        self.seq_depth = np.zeros((num_envs, sequence_len, depth_hist_len, *self.cropped_depth_shape), dtype=np.float32)
+        self.seq_depth = np.zeros((num_envs, sequence_len, depth_hist_len, *depth_shape), dtype=np.float32)
         
         self.seq_action = None 
         self.seq_target_yaw = np.zeros((num_envs, sequence_len, 2), dtype=np.float32)
@@ -108,34 +106,8 @@ class SequenceAggregator:
         # 填入最新数据
         self.prop_history[:, -1, :] = obs_prop
         
-        # Depth cropping and normalization logic
-        # Crop: [:, :-2, 4:-4]
-        cropped_depth = depth_frame[:, :-2, 4:-4]
-        # Normalize: (depth / max_dist) - 0.5 (Assume depth_frame is already float scaled)
-        # Note: If depth_frame is already processed by image_features, it might be normalized.
-        # Checking image_features in observations.py: it does (d/clip) - 0.5.
-        # But here we might receive raw or partially processed. 
-        # For simplicity and alignment, we assume input 'depth_frame' 
-        # is raw-ish (0-1 approx) or needs compatible cropping.
-        # If input came from TeacherDatasetStreamer, it's float/scale. 
-        # If input came from DAGGER 'depth_camera' term, it is ALREADY cropped & normalized 
-        # by 'image_features' class in observations.py!
-        # WAIT: 'image_features' in observations.py ALREADY does crop [:-2, 4:-4] and norm.
-        # So if we are in DAGGER, `depth_frame` passed here is already 56x79.
-        # BUT if we are in offline dataset, `depth` is 58x87.
-        # We need to handle both.
-        
-        if cropped_depth.shape[-2:] != self.cropped_depth_shape:
-             # If input is already cropped (DAGGER case), direct assign
-             # But dimension check is needed.
-             if depth_frame.shape[-2:] == self.cropped_depth_shape:
-                  self.depth_history[:, -1, :, :] = depth_frame
-             else:
-                  # Fallback or error?
-                  # For now, apply crop if shape matches original
-                  self.depth_history[:, -1, :, :] = cropped_depth
-        else:
-             self.depth_history[:, -1, :, :] = cropped_depth
+        # Depth: use original shape (58x87) without cropping, matching train.py distillation
+        self.depth_history[:, -1, :, :] = depth_frame
 
         # --- 2. 存入序列 Buffer ---
         # Flatten Proprio: [Num_Envs, Hist_Len, Dim] -> [Num_Envs, Hist_Len * Dim]
