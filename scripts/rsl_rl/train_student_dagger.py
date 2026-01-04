@@ -284,10 +284,8 @@ def main():
         base_parkour = None
         num_goals = None
     
-    # Butter for Closed-Loop Yaw Injection
-    # Stores the student's predicted yaw from the PREVIOUS step
-    # Shape: [num_envs, 2] (matches indices 6:8 of proprio)
-    last_yaw_pred = np.zeros((args.num_envs, 2), dtype=np.float32)
+    # Butter for Closed-Loop Yaw Injection - Removed as requested
+    # last_yaw_pred = np.zeros((args.num_envs, 2), dtype=np.float32)
 
     # ===== main training loop =====
     train_start_t = time.time()
@@ -312,26 +310,8 @@ def main():
             teacher_actions_cpu = teacher_actions.cpu()
             teacher_actions_np = teacher_actions_cpu.numpy()
 
-            # --- Mask Proprioception & Closed-Loop Injection ---
-            # 1. Start with a masked proprio (default assumption: blind to true yaw)
+            # --- Mask Proprioception & Closed-Loop Injection (Removed as requested) ---
             obs_prop_np_masked = obs_prop_np.copy()
-            obs_prop_np_masked[:, 6:8] = 0.0
-
-            # 2. Extract delta_yaw_ok signal
-            # Check if we have the signal from extras (requires StudentObservationsCfg to include it)
-            # Default to False (conservative) if missing
-            if "delta_yaw_ok" in extras["observations"]:
-                # delta_yaw_ok might be a boolean tensor [Num_Envs, 1]
-                yaw_ok_tensor = extras["observations"]["delta_yaw_ok"]
-                yaw_ok_np = yaw_ok_tensor.cpu().numpy().reshape(-1) # [Num_Envs] bool
-                
-                # 3. Inject PREVIOUS prediction where yaw is OK
-                # Policy: If yaw was OK, we trust the student's own visual estimation from last step.
-                # This closes the loop: Action t depends on Yaw_Pred t-1.
-                # Note: last_yaw_pred is initialized to 0.
-                inject_mask = yaw_ok_np.astype(bool)
-                if np.any(inject_mask):
-                    obs_prop_np_masked[inject_mask, 6:8] = last_yaw_pred[inject_mask]
             
             # --- student acting ---
             # build student input from its own histories (aggregator stores them)
@@ -360,12 +340,9 @@ def main():
             # TXL 单步推理：使用记忆状态 txl_mems
             student.eval()
             with torch.no_grad():
-                # Student now returns yaw_pred_step as well (though currently unused in stepping)
-                actions_step, yaw_pred_step, new_mems = student.forward_step(prop_step, depth_step, mems=txl_mems)
+                # Student prediction (yaw_pred_step removed)
+                actions_step, _, new_mems = student.forward_step(prop_step, depth_step, mems=txl_mems)
                 student_act = actions_step.cpu()
-                
-                # Update last_yaw_pred for NEXT step's injection
-                last_yaw_pred = yaw_pred_step.cpu().numpy()
 
             # 在环境 step 前缓存当前的 goal 索引（否则 step 内部 reset 后 cur_goal_idx 会被清零）
             if base_parkour is not None and num_goals and num_goals > 0:
@@ -420,9 +397,7 @@ def main():
                 ep_lengths[done_indices] = 0
                 episodes_this_iter += len(done_indices)
                 
-                # Reset injection buffer for done envs
-                # New episode starts with 0 yaw assumption
-                last_yaw_pred[done_indices] = 0.0
+                # last_yaw_pred reset removed
 
             # 更新 TXL 记忆：对已经 done 的环境清零对应的 memory
             if new_mems is not None:
@@ -465,18 +440,13 @@ def main():
         if any_done.any():
             for l_idx in range(len(train_mems)):
                 if train_mems[l_idx] is not None:
-                    train_mems[l_idx][any_done] = 0.0
+                    # 使用非原地操作，避免修改 graph 中引用的 underlying storage
+                    mask = any_done.view(-1, 1, 1)
+                    train_mems[l_idx] = torch.where(mask, torch.zeros_like(train_mems[l_idx]), train_mems[l_idx])
 
         loss_actions = nn.functional.mse_loss(pred, teacher_t)
         
-        # Auxiliary Yaw Loss
-        if "target_yaw" in batch:
-             target_yaw = torch.from_numpy(batch["target_yaw"]).float().to(device)
-             loss_yaw = nn.functional.mse_loss(yaw_pred, target_yaw)
-        else:
-             loss_yaw = 0.0
-
-        loss = loss_actions + loss_yaw
+        loss = loss_actions
 
         # 监控标签与残差的幅值，便于判断 loss 量级
         with torch.no_grad():
@@ -511,7 +481,6 @@ def main():
             wandb_metrics = {
                 "train/loss": loss.item(),
                 "train/loss_actions": loss_actions.item(),
-                "train/loss_yaw": loss_yaw.item() if isinstance(loss_yaw, Tensor) else loss_yaw,
                 "time/iter_s": iter_time,
                 "time/eta_s": eta_seconds,
                 "time/elapsed_s": elapsed,
@@ -542,6 +511,13 @@ def main():
             if len(timeout_hist) > 0:
                 timeout_rate = float(np.mean(timeout_hist))
                 wandb_metrics["rollout/timeout_rate"] = timeout_rate
+            
+            # --- New Metric: Terrain Level ---
+            if base_parkour is not None:
+                # base_parkour.terrain is the ParkourTerrainImporter which holds terrain_levels
+                avg_level = float(base_parkour.terrain.terrain_levels.float().mean().item())
+                wandb_metrics["rollout/terrain_level_mean"] = avg_level
+
             wandb.log(wandb_metrics, step=global_step)
 
         # save

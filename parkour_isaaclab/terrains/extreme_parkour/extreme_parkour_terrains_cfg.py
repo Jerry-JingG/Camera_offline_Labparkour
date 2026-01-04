@@ -10,7 +10,7 @@ class ExtremeParkourRoughTerrainCfg(ParkourSubTerrainBaseCfg):
     noise_range: tuple[float,float] = (0.02, 0.06)
     noise_step: float = 0.005
     x_range: tuple[float, float] = (0.8, 1.5)
-    y_range: tuple[float, float] = (-0.4, 0.4)
+    y_range: tuple[float, float] = (-0.0, 0.0)
     half_valid_width: tuple[float, float] = (0.6, 1.2)
     pad_width: float = 0.1 
     pad_height: float = 0.0
@@ -31,6 +31,14 @@ class ExtremeParkourHurdleTerrainCfg(ExtremeParkourRoughTerrainCfg):
 class ExtremeParkourStepTerrainCfg(ExtremeParkourRoughTerrainCfg):
     function = extreme_parkour_terrians.parkour_step_terrain
     step_height: str = '0.1 + 0.35*difficulty'
+
+@configclass
+class ExtremeParkourBeamTerrainCfg(ExtremeParkourRoughTerrainCfg):
+    function = extreme_parkour_terrians.parkour_beam_terrain
+    beam_length: str = '0.3 + 0.3 * difficulty'
+    beam_height_range: str = '0.35 - 0.15 * difficulty, 0.45 - 0.15 * difficulty'
+    beam_depth: float = 0.2  # Thickness of the beam
+
 
 @configclass
 class ExtremeParkourTerrainCfg(ExtremeParkourRoughTerrainCfg):

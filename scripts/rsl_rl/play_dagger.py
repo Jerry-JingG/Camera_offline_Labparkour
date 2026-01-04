@@ -226,7 +226,7 @@ class StudentOnlineRunner:
                             padded.append(torch.cat([pad, m], dim=1))
                     mems_ready.append(torch.cat(padded, dim=0))
             with torch.no_grad():
-                pred_ready, new_mems = self.model.forward_step(  # type: ignore[attr-defined]
+                pred_ready, yaw_pred_ready, new_mems = self.model.forward_step(  # type: ignore[attr-defined]
                     proprios_ready, depths_ready, mems=mems_ready
                 )  # [N_ready, action_dim]
             actions_ready = pred_ready  # single-step output

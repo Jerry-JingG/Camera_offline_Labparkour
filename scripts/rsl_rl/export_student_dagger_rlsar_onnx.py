@@ -99,7 +99,7 @@ class _StudentMemsWrapper(torch.nn.Module):
             )
         # mems: [B, L, M, C] -> list([B, M, C] * L)
         mem_list = [mems[:, i, :, :] for i in range(self.num_layers)]
-        actions, new_mems = self.student.forward_step(proprio, depth, mems=mem_list)
+        actions, _yaw_pred, new_mems = self.student.forward_step(proprio, depth, mems=mem_list)
         # new_mems: list([B, M, C]) -> [B, L, M, C]
         mems_out = torch.stack(new_mems, dim=1)
         return actions, mems_out

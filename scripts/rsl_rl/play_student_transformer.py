@@ -161,8 +161,8 @@ class StudentOnlineRunner:
         self.prop_histories: List[deque] = [deque(maxlen=prop_hist_len) for _ in range(num_envs)]
         self.depth_histories: List[deque] = [deque(maxlen=depth_hist_len) for _ in range(num_envs)]
         self.mems: List[torch.Tensor] | None = None
-        # Closed-loop yaw injection buffer
-        self.last_yaw_pred = torch.zeros((num_envs, 2), device=device, dtype=torch.float32)
+        # Closed-loop yaw injection buffer - Removed
+        # self.last_yaw_pred = torch.zeros((num_envs, 2), device=device, dtype=torch.float32)
         self.reset()
 
     def reset(self) -> None:
@@ -175,7 +175,7 @@ class StudentOnlineRunner:
             for _ in range(self.depth_hist_len):
                 self.depth_histories[env_id].append(torch.zeros(*self.camera_resolution, device=self.device))
         self.mems = None
-        self.last_yaw_pred.zero_()
+        # self.last_yaw_pred.zero_()
 
     def reset_done(self, done_mask: torch.Tensor) -> None:
         """Clear histories and TXL mems for envs that are done."""
@@ -194,9 +194,9 @@ class StudentOnlineRunner:
                     continue
                 mem[done_mask] = 0.0
         
-        # Reset last_yaw_pred for done envs
-        if isinstance(done_mask, torch.Tensor):
-             self.last_yaw_pred[done_mask] = 0.0
+        # Reset last_yaw_pred for done envs - Removed
+        # if isinstance(done_mask, torch.Tensor):
+        #      self.last_yaw_pred[done_mask] = 0.0
 
     def act(self, obs_prop: torch.Tensor, depth_image: torch.Tensor) -> torch.Tensor:
         obs_prop = obs_prop.to(self.device)
@@ -208,11 +208,10 @@ class StudentOnlineRunner:
             depth_image = depth_image.squeeze(1)
 
         for env_id in range(self.num_envs):
-            # Mask and Inject BEFORE appending to history
-            # This ensures the history buffer consistently contains "what the agent saw" (closed-loop)
+            # Mask and Inject (Removed as requested)
             cur_obs = obs_prop[env_id].clone()
-            cur_obs[6:8] = 0.0 # Mask true
-            cur_obs[6:8] = self.last_yaw_pred[env_id] # Inject pred
+            # cur_obs[6:8] = 0.0
+            # cur_obs[6:8] = self.last_yaw_pred[env_id] 
             
             self.prop_histories[env_id].append(cur_obs)
             self.depth_histories[env_id].append(depth_image[env_id])
@@ -278,11 +277,11 @@ class StudentOnlineRunner:
         pass # placeholder for thought process
         
         with torch.no_grad():
-             # Fix unpacking: actions, yaw_pred, new_mems
-            actions_step, yaw_pred, new_mems = self.model.forward_step(prop_batch_t, depth_batch_t, mems=self.mems)
+             # Fix unpacking: actions, _, new_mems
+            actions_step, _, new_mems = self.model.forward_step(prop_batch_t, depth_batch_t, mems=self.mems)
         
         self.mems = new_mems
-        self.last_yaw_pred = yaw_pred.detach()
+        # self.last_yaw_pred = yaw_pred.detach()
         return actions_step
 
 

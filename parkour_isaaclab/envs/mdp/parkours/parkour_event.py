@@ -41,6 +41,8 @@ class ParkourEvent(ParkourTerm):
         self.metrics["how_far_from_start_point"] = torch.zeros(self.num_envs, device='cpu')
         self.metrics["terrain_levels"] = torch.zeros(self.num_envs, device='cpu')
         self.metrics["current_goal_idx"] = torch.zeros(self.num_envs, device='cpu')
+        self.metrics["track_progress"] = torch.zeros(self.num_envs, device='cpu')
+        self.metrics["success_ratio"] = torch.zeros(self.num_envs, device='cpu')
         self.dis_to_start_pos = torch.zeros(self.num_envs, device=self.device)
         self.terrain: ParkourTerrainImporter = self.env.scene.terrain
         terrain_generator: ParkourTerrainGenerator = self.terrain.terrain_generator_class
@@ -187,6 +189,8 @@ class ParkourEvent(ParkourTerm):
         self.metrics["far_from_current_goal"] = (torch.norm(self.cur_goals[:, :2] - robot_root_pos_w,dim =-1) - self.next_goal_threshold).to(device = 'cpu')
         self.metrics["current_goal_idx"] = self.cur_goal_idx.to(device='cpu', dtype=float)
         self.metrics["how_far_from_start_point"] = self.dis_to_start_pos.to(device = 'cpu')
+        self.metrics["track_progress"] = (self.cur_goal_idx.float() / self.num_goals).to(device='cpu')
+        self.metrics["success_ratio"] = (self.metrics["track_progress"] > 0.7).float() # Percentage of envs reaching >70% progress
         
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first tome

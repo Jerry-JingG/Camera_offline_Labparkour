@@ -85,7 +85,7 @@ class SequenceAggregator:
         self.seq_depth = np.zeros((num_envs, sequence_len, depth_hist_len, *depth_shape), dtype=np.float32)
         
         self.seq_action = None 
-        self.seq_target_yaw = np.zeros((num_envs, sequence_len, 2), dtype=np.float32)
+        self.seq_target_yaw = None
         self.seq_done = np.zeros((num_envs, sequence_len), dtype=bool)
         
         self.current_seq_step = 0
@@ -120,9 +120,8 @@ class SequenceAggregator:
         self.seq_prop[:, idx] = current_prop_flat
         self.seq_depth[:, idx] = self.depth_history 
         self.seq_action[:, idx] = teacher_actions
-        # Extract target yaw from LAST step of proprio history
-        # indices 6 and 7 are delta_yaw and delta_next_yaw in ExtremeParkourObservations
-        self.seq_target_yaw[:, idx] = self.prop_history[:, -1, 6:8]
+        # target yaw removed as requested
+        # self.seq_target_yaw[:, idx] = self.prop_history[:, -1, 6:8]
         self.seq_done[:, idx] = done
 
         # --- 3. 处理 Done (批量清零) ---
@@ -148,7 +147,6 @@ class SequenceAggregator:
             "proprio": self.seq_prop.copy(),
             "depth": self.seq_depth.copy(),
             "actions": self.seq_action.copy(),
-            "target_yaw": self.seq_target_yaw.copy(),
             "dones": self.seq_done.copy()
         }
 
@@ -272,7 +270,7 @@ class MultiModalStudentPolicy(nn.Module):
             grid_size=fusion_cfg.get("grid_size", 4),
             dropout=fusion_cfg.get("depth_dropout", 0.1),
         )
-        self.yaw_head = nn.Linear(token_dim, 2)  # Auxiliary task: predict delta_yaw, delta_next_yaw
+        # self.yaw_head = nn.Linear(token_dim, 2)  # Removed as requested
         self.fusion_transformer = MultiModalFusionTransformer(
             token_dim=token_dim,
             num_layers=fusion_cfg.get("num_layers", 2),
@@ -329,8 +327,8 @@ class MultiModalStudentPolicy(nn.Module):
             return_mems=False,
         )
         actions = self.action_head.forward_sequence(temporal_out)["mean"]
-        yaw_pred = self.yaw_head(temporal_out)
-        return actions, yaw_pred
+        # yaw_pred = self.yaw_head(temporal_out) # Removed
+        return actions, None
 
     def forward_with_mems(
         self,
@@ -372,17 +370,17 @@ class MultiModalStudentPolicy(nn.Module):
             return_mems=True,    # Return new mems for next segment
         )
         
-        # 4. Action head and Yaw head
+        # 4. Action head
         actions = self.action_head.forward_sequence(temporal_out)["mean"]
-        yaw_pred = self.yaw_head(temporal_out)
-        return actions, yaw_pred, new_mems
+        # yaw_pred = self.yaw_head(temporal_out) # Removed
+        return actions, None, new_mems
 
     def forward_step(
         self,
         proprio_step: Tensor,
         depth_step: Tensor,
         mems: Optional[List[Optional[Tensor]]] = None,
-    ) -> Tuple[Tensor, Optional[List[Tensor]]]:
+    ) -> Tuple[Tensor, Tensor, Optional[List[Tensor]]]:
         """单步前向接口，用于在线推理 / DAGGER。
 
         Args:
@@ -392,6 +390,7 @@ class MultiModalStudentPolicy(nn.Module):
 
         Returns:
             actions_step: Tensor[B, action_dim]，当前步动作均值。
+            yaw_pred_step: Tensor[B, 2]，辅助任务预测的偏航角变化。
             new_mems: 更新后的记忆状态列表。
         """
         if proprio_step.dim() != 2:
@@ -410,7 +409,7 @@ class MultiModalStudentPolicy(nn.Module):
         
         # Remove sequence dimension
         actions_step = actions_seq.squeeze(1)
-        yaw_pred_step = yaw_pred_seq.squeeze(1)
+        yaw_pred_step = yaw_pred_seq.squeeze(1) if yaw_pred_seq is not None else None
         # print("debug: using mem in dagger.")  # [B, action_dim]
         return actions_step, yaw_pred_step, new_mems
 
@@ -602,14 +601,7 @@ def train_batch(
     # Action Loss
     loss_actions = torch.nn.functional.mse_loss(predictions, teacher_actions)
     
-    # Auxiliary Yaw Loss (if available in batch)
-    if "target_yaw" in batch_data:
-        target_yaw = torch.from_numpy(batch_data["target_yaw"]).to(device)
-        loss_yaw = torch.nn.functional.mse_loss(yaw_pred, target_yaw)
-    else:
-        loss_yaw = 0.0
-
-    loss = loss_actions + loss_yaw
+    loss = loss_actions
 
     optimizer.zero_grad(set_to_none=True)
     loss.backward()

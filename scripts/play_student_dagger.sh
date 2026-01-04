@@ -4,7 +4,7 @@
 set -euo pipefail
 
 TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Play-v0"
-STUDENT_CKPT="logs/rsl_rl/student_dagger_transformer/student-dagger-12-15-6/student_epoch_037400.pt"
+STUDENT_CKPT="logs/rsl_rl/student_dagger_transformer/student-dagger-1-2/student_epoch_final.pt"
 NUM_ENVS=16
 PROP_HIST_LEN=3
 DEPTH_HIST_LEN=4

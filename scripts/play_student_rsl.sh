@@ -6,12 +6,13 @@
 
 set -euo pipefail
 
-TASK_ID="Isaac-Extreme-Parkour-Student-Unitree-Go2-Play-v0"
+TASK_ID="Isaac-Extreme-Parkour-Teacher-Unitree-Go2-Play-v0"
 NUM_ENVS=16
-CHECKPOINT="/home/jing/Datasets/2025-09-03_12-07-56/model_99998.pt"
+CHECKPOINT="/home/jing/IsaacLab/Camera_offline_Labparkour/logs/rsl_rl/unitree_go2_parkour/2025-12-30_22-14-25_12-30-teacher-1/model_49999.pt"
 
 DEVICE_ARG="cuda:0"    # 可改为 cpu
 HEADLESS_FLAG=false    # 无界面可设为 true
+FREE_CAM=true          # 设置为 true 使用自由视角，false 则跟随机器人
 REAL_TIME_FLAG=false   # 如需实时播放设为 true
 VIDEO_FLAG=false       # 如需录制视频设为 true
 VIDEO_LENGTH=500
@@ -37,6 +38,10 @@ fi
 
 if [[ "${HEADLESS_FLAG}" == true ]]; then
     CMD+=("--headless")
+fi
+
+if [[ "${FREE_CAM}" == true ]]; then
+    CMD+=("--free_cam")
 fi
 
 if [[ "${REAL_TIME_FLAG}" == true ]]; then
