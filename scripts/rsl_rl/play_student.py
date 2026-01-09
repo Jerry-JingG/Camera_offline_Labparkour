@@ -141,7 +141,6 @@ class StudentOnlineRunner:
         depth_hist_len: int,
         camera_resolution: Tuple[int, int],
         device: torch.device,
-        sequence_length: int = 16,  # 此参数现在仅用于兼容性，mems 长度由模型的 mem_len 决定
     ) -> None:
         self.model = model
         self.num_envs = num_envs
@@ -150,7 +149,6 @@ class StudentOnlineRunner:
         self.depth_hist_len = depth_hist_len
         self.camera_resolution = camera_resolution
         self.device = device
-        self.sequence_length = sequence_length
 
         # 短期记忆：存储最近 N 帧的本体感知和深度图像，用于构建单个 token
         self.prop_histories: List[deque] = [deque(maxlen=prop_hist_len) for _ in range(num_envs)]
@@ -393,12 +391,7 @@ def parse_args_play() -> argparse.Namespace:
     parser.add_argument("--num_envs", type=int, default=8, help="Number of parallel environments.")
     parser.add_argument("--prop_hist_len", type=int, default=3, help="History length for proprio tokens.")
     parser.add_argument("--depth_hist_len", type=int, default=4, help="History length for depth tokens.")
-    parser.add_argument(
-        "--sequence_length",
-        type=int,
-        default=64,
-        help="Temporal sequence length S for the student TXL during play.",
-    )
+
     parser.add_argument(
         "--mem_len",
         type=int,
@@ -482,7 +475,6 @@ def main() -> None:
         depth_hist_len=args.depth_hist_len,
         camera_resolution=camera_resolution,  # type: ignore[arg-type]
         device=device,
-        sequence_length=args.sequence_length,
     )
     runner.reset()
 

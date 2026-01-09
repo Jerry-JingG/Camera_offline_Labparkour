@@ -34,6 +34,8 @@ except ImportError:
     WANDB_AVAILABLE = False
     print("[warning] wandb not installed. Run `pip install wandb` to enable logging.")
 
+from utils.dropout_manager import CameraDropoutManager
+
 # Ensure repo roots are importable
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 MODULES_ROOT = Path(PROJECT_ROOT) / "parkour_tasks" / "parkour_tasks" / "extreme_parkour_task" / "modules"
@@ -154,6 +156,7 @@ class TeacherDatasetStreamer:
         sequence_len: int,
         prop_hist_len: int,
         depth_hist_len: int,
+        use_dropout: bool = False,
     ) -> None:
         self.dataset_dir = dataset_dir
         self.meta = self._load_meta(dataset_dir)
@@ -174,6 +177,20 @@ class TeacherDatasetStreamer:
             depth_hist_len=depth_hist_len,
             sequence_len=sequence_len,
         )
+        
+        # Camera Dropout Augmentation
+        self.dropout_manager = None
+        if use_dropout:
+            print("[Streamer] Training-time Camera Dropout Augmentation: ENABLED")
+            dt = float(self.meta.get("step_dt", 0.02))
+            self.dropout_manager = CameraDropoutManager(
+                num_envs=self.num_envs,
+                device=torch.device("cpu"),
+                dt=dt,
+                prob_start_offline=0.05,
+                online_duration_range=(2.0, 20.0),
+                offline_duration_range=(1.0, 10.0)
+            )
 
     @staticmethod
     def _load_meta(dataset_dir: Path) -> Dict[str, object]:
@@ -188,6 +205,12 @@ class TeacherDatasetStreamer:
         self.aggregator.reset()
         batches_yielded = 0
 
+        prev_dones = torch.zeros(self.num_envs, dtype=torch.bool)
+        
+        # Dropout statistics tracking
+        segment_offline_count = 0
+        segment_total_count = 0
+
         for shard_path in self.shards:
             with np.load(shard_path, allow_pickle=False) as shard:
                 obs_prop = shard["obs_prop"].astype(np.float32)
@@ -198,6 +221,20 @@ class TeacherDatasetStreamer:
 
                 for step_idx in range(num_steps):
                     depth_frame = self._convert_depth(depth[step_idx])
+                    
+                    # Camera Dropout Augmentation
+                    if self.dropout_manager is not None:
+                        self.dropout_manager.reset_env(prev_dones)
+                        depth_tensor = torch.from_numpy(depth_frame)
+                        self.dropout_manager.update(depth_tensor)
+                        depth_frame = depth_tensor.numpy()
+                        
+                        # Track dropout statistics
+                        segment_offline_count += self.dropout_manager.offline_state.sum().item()
+                        segment_total_count += self.num_envs
+                    
+                    prev_dones = torch.from_numpy(dones[step_idx].reshape(-1))
+                    
                     # Push step and check if a batch is ready
                     batch_data = self.aggregator.push_step(
                         obs_prop=obs_prop[step_idx],
@@ -207,6 +244,16 @@ class TeacherDatasetStreamer:
                     )
 
                     if batch_data is not None:
+                        # Add dropout statistics to batch data
+                        if self.dropout_manager is not None and segment_total_count > 0:
+                            batch_data["dropout_rate"] = segment_offline_count / segment_total_count
+                        else:
+                            batch_data["dropout_rate"] = 0.0
+                        
+                        # Reset segment counters
+                        segment_offline_count = 0
+                        segment_total_count = 0
+                        
                         yield batch_data
                         # 注意：这里的 max_sequences 语义略有变化，变成 max_batches
                         batches_yielded += 1
@@ -417,6 +464,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wandb_project", type=str, default="offline-BC", help="Wandb project name.")
     parser.add_argument("--wandb_run_name", type=str, default=None, help="Wandb run name (defaults to auto-generated).")
     parser.add_argument("--wandb_entity", type=str, default=None, help="Wandb entity (team/username).")
+    
+    # Camera Dropout augmentation
+    parser.add_argument("--use_dropout", action="store_true", default=False, help="在训练时添加随机相机掉线增强")
+    
     return parser.parse_args()
 
 
@@ -520,6 +571,7 @@ def run_training() -> None:
         sequence_len=args.sequence_length,
         prop_hist_len=args.prop_hist_len,
         depth_hist_len=args.depth_hist_len,
+        use_dropout=args.use_dropout,
     )
     model, _ = build_student_from_dataset(streamer, args.prop_hist_len, args.depth_hist_len)
     device = torch.device(args.device)
@@ -587,11 +639,14 @@ def run_training() -> None:
             
             num_updates = 0
             epoch_sequences = 0
+            
+            # Initialize memory for TransformerXL segment recurrence
+            mems = None  # Will be populated after first batch
 
             # 直接迭代 Batch (无需再组装 samples)
             for batch_data in streamer.iter_batches(max_sequences=args.max_sequences_per_epoch):
                 batch_start = time.time()
-                metrics = train_batch(model, optimizer, batch_data, device, args.grad_clip)
+                metrics, mems = train_batch(model, optimizer, batch_data, device, args.grad_clip, mems=mems)
                 batch_time = time.time() - batch_start
 
                 # Accumulate metrics
@@ -627,6 +682,8 @@ def run_training() -> None:
                         # teacher/ metrics
                         "teacher/action_rms": metrics["teacher_action_rms"],
                         "teacher/action_abs_max": metrics["teacher_action_abs_max"],
+                        # dropout/ metrics
+                        "dropout/rate": batch_data.get("dropout_rate", 0.0),
                         # perf/ metrics
                         "perf/sequences_per_sec": sequences_per_sec,
                         "perf/total_sequences": total_sequences,
@@ -640,7 +697,8 @@ def run_training() -> None:
 
                 if args.log_interval > 0 and num_updates % args.log_interval == 0:
                     avg_loss = np.mean(epoch_losses)
-                    print(f"[epoch {epoch}] step {global_step} | updates={num_updates} | avg_loss={avg_loss:.6f}")
+                    dropout_rate = batch_data.get("dropout_rate", 0.0)
+                    print(f"[epoch {epoch}] step {global_step} | updates={num_updates} | avg_loss={avg_loss:.6f} | dropout={dropout_rate:.1%}")
 
             epoch_time = time.time() - epoch_start
             
@@ -689,25 +747,31 @@ def train_batch(
     batch_data: Dict[str, np.ndarray],
     device: torch.device,
     grad_clip: float,
-) -> Dict[str, float]:
+    mems: Optional[List[Tensor]] = None,
+) -> Tuple[Dict[str, float], Optional[List[Tensor]]]:
     """
     Train a single batch and return detailed metrics.
     
+    Args:
+        model: The student policy model
+        optimizer: The optimizer
+        batch_data: Dictionary containing proprio, depth, actions, dones
+        device: Training device
+        grad_clip: Gradient clipping threshold
+        mems: Optional memory tensors from the previous batch (should already be detached)
+    
     Returns:
-        Dict containing:
-        - loss: MSE loss value
-        - diff_rmse: Root mean square error between predictions and teacher actions
-        - rel_rmse: Relative RMSE (normalized by teacher action RMS)
-        - grad_norm: L2 norm of gradients
-        - grad_norm_max: Maximum gradient norm across parameters
-        - teacher_action_rms: RMS of teacher actions
-        - teacher_action_abs_max: Max absolute value of teacher actions
+        Tuple of:
+        - Dict containing loss metrics
+        - new_mems: List of memory tensors for next batch (detached from computation graph)
     """
     proprio = torch.from_numpy(batch_data["proprio"]).to(device)
     depth = torch.from_numpy(batch_data["depth"]).to(device)
     teacher_actions = torch.from_numpy(batch_data["actions"]).to(device)
+    dones = torch.from_numpy(batch_data["dones"]).to(device)  # [B, S]
 
-    predictions = model(proprio, depth)
+    # Use forward_with_mems for segment recurrence training
+    predictions, new_mems = model.forward_with_mems(proprio, depth, mems=mems)
     
     # Compute loss
     loss = torch.nn.functional.mse_loss(predictions, teacher_actions)
@@ -736,7 +800,20 @@ def train_batch(
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
     
-    return {
+    # Detach mems to prevent gradient flow across segments (Truncated BPTT)
+    if new_mems is not None:
+        new_mems = [m.detach() for m in new_mems]
+        
+        # Reset mems for environments that had done=True at end of sequence
+        # This ensures training behavior matches inference (mems cleared on episode reset)
+        final_dones = dones[:, -1].bool()  # [B] - check last step of sequence
+        if final_dones.any():
+            for layer_idx in range(len(new_mems)):
+                # Clone to avoid modifying original, then zero out done envs
+                new_mems[layer_idx] = new_mems[layer_idx].clone()
+                new_mems[layer_idx][final_dones] = 0.0
+    
+    metrics = {
         "loss": float(loss.item()),
         "diff_rmse": diff_rmse,
         "rel_rmse": rel_rmse,
@@ -745,6 +822,7 @@ def train_batch(
         "teacher_action_rms": teacher_action_rms,
         "teacher_action_abs_max": teacher_action_abs_max,
     }
+    return metrics, new_mems
 
 
 if __name__ == "__main__":
