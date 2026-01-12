@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="multi_env_parkour_terrain_with_beams">
+  <compiler angle="radian" autolimits="true"/>
+  
+  <option gravity="0 0 -9.81" timestep="0.002"/>
+  
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="150" elevation="-20"/>
+    <quality shadowsize="4096"/>
+  </visual>
+  
+  <asset>
+    <!-- Multi-env terrain height field -->
+    <hfield name="parkour_terrain" 
+            file="multi_env_terrain_heightmap.png"
+            size="24.0 10.0 2.2720 0.1"/>
+    
+    <texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.8" rgb2="0 0 0" width="512" height="3072"/>
+    <material name="terrain_mat" rgba="0.55 0.5 0.45 1" specular="0.1"/>
+    <material name="beam_mat" rgba="0.6 0.3 0.2 1" specular="0.3"/>
+    <material name="ball_mat" rgba="0.9 0.2 0.2 1"/>
+  </asset>
+  
+  <worldbody>
+    <!-- Terrain -->
+    <geom name="terrain" type="hfield" hfield="parkour_terrain" 
+          pos="0 0 0.7000" material="terrain_mat"/>
+
+    <!-- Beam 0 -->
+    <geom name="beam_0" type="box" pos="-21.840 8.000 1.148" 
+          size="0.200 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 1 -->
+    <geom name="beam_1" type="box" pos="-20.480 8.000 1.117" 
+          size="0.200 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 2 -->
+    <geom name="beam_2" type="box" pos="-18.640 8.000 1.119" 
+          size="0.200 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 3 -->
+    <geom name="beam_3" type="box" pos="-16.960 8.000 1.155" 
+          size="0.200 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 4 -->
+    <geom name="beam_4" type="box" pos="-15.440 8.000 1.172" 
+          size="0.200 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 5 -->
+    <geom name="beam_5" type="box" pos="-13.600 8.000 1.165" 
+          size="0.200 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 6 -->
+    <geom name="beam_6" type="box" pos="-11.840 8.000 1.200" 
+          size="0.200 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 7 -->
+    <geom name="beam_7" type="box" pos="-10.080 8.000 1.105" 
+          size="0.200 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 8 -->
+    <geom name="beam_8" type="box" pos="-5.360 8.000 1.088" 
+          size="0.240 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 9 -->
+    <geom name="beam_9" type="box" pos="-3.600 8.000 1.164" 
+          size="0.240 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 10 -->
+    <geom name="beam_10" type="box" pos="-2.080 8.000 1.167" 
+          size="0.240 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 11 -->
+    <geom name="beam_11" type="box" pos="-0.480 8.000 1.111" 
+          size="0.240 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 12 -->
+    <geom name="beam_12" type="box" pos="1.680 8.000 1.098" 
+          size="0.240 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 13 -->
+    <geom name="beam_13" type="box" pos="3.120 8.000 1.150" 
+          size="0.240 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 14 -->
+    <geom name="beam_14" type="box" pos="4.480 8.000 1.129" 
+          size="0.240 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 15 -->
+    <geom name="beam_15" type="box" pos="5.760 8.000 1.100" 
+          size="0.240 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 16 -->
+    <geom name="beam_16" type="box" pos="10.720 8.000 1.058" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 17 -->
+    <geom name="beam_17" type="box" pos="12.560 8.000 1.038" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 18 -->
+    <geom name="beam_18" type="box" pos="14.640 8.000 1.065" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 19 -->
+    <geom name="beam_19" type="box" pos="16.160 8.000 1.070" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 20 -->
+    <geom name="beam_20" type="box" pos="17.600 8.000 1.040" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 21 -->
+    <geom name="beam_21" type="box" pos="19.040 8.000 1.060" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 22 -->
+    <geom name="beam_22" type="box" pos="21.120 8.000 1.101" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
+    <body name="test_ball_0" pos="-23.00 0.00 0.5">
+      <freejoint/>
+      <geom type="sphere" size="0.08" material="ball_mat" mass="0.5"/>
+    </body>
+    <body name="test_ball_1" pos="-7.00 0.00 0.5">
+      <freejoint/>
+      <geom type="sphere" size="0.08" material="ball_mat" mass="0.5"/>
+    </body>
+    <body name="test_ball_2" pos="9.00 0.00 0.5">
+      <freejoint/>
+      <geom type="sphere" size="0.08" material="ball_mat" mass="0.5"/>
+    </body>
+    
+    <!-- Lighting -->
+    <light pos="0 0 15" dir="0 0 -1" diffuse="0.8 0.8 0.8" castshadow="true"/>
+  </worldbody>
+</mujoco>
