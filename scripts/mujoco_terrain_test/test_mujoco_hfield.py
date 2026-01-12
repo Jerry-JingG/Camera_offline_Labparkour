@@ -18,11 +18,11 @@ import os
 def main():
     # Load the scene
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    scene_path = os.path.join(script_dir, "output", "hurdle_terrain_scene.xml")
+    scene_path = os.path.join(script_dir, "output", "multi_env_terrain_scene.xml")
     
     if not os.path.exists(scene_path):
         print(f"Error: Scene file not found at {scene_path}")
-        print("Please run export_gap_hfield.py first to generate the scene.")
+        print("Please run export.py first to generate the scene.")
         return
     
     print("=" * 50)

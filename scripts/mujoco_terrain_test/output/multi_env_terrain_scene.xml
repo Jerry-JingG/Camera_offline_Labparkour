@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="multi_env_parkour_terrain">
+  <compiler angle="radian" autolimits="true"/>
+  
+  <option gravity="0 0 -9.81" timestep="0.002"/>
+  
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="150" elevation="-20"/>
+    <quality shadowsize="4096"/>
+  </visual>
+  
+  <asset>
+    <!-- Multi-env terrain height field -->
+    <hfield name="parkour_terrain" 
+            file="multi_env_terrain_heightmap.png"
+            size="24.0 10.0 2.3466 0.1"/>
+    
+    <texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.8" rgb2="0 0 0" width="512" height="3072"/>
+    <material name="terrain_mat" rgba="0.55 0.5 0.45 1" specular="0.1"/>
+    <material name="ball_mat" rgba="0.9 0.2 0.2 1"/>
+  </asset>
+  
+  <worldbody>
+    <!-- Terrain -->
+    <geom name="terrain" type="hfield" hfield="parkour_terrain" 
+          pos="0 0 0.7750" material="terrain_mat"/>
+    
+    <!-- Test balls - one per row at the start -->
+    <body name="test_ball_0" pos="-23.00 0.00 0.5">
+      <freejoint/>
+      <geom type="sphere" size="0.08" material="ball_mat" mass="0.5"/>
+    </body>
+    <body name="test_ball_1" pos="-7.00 0.00 0.5">
+      <freejoint/>
+      <geom type="sphere" size="0.08" material="ball_mat" mass="0.5"/>
+    </body>
+    <body name="test_ball_2" pos="9.00 0.00 0.5">
+      <freejoint/>
+      <geom type="sphere" size="0.08" material="ball_mat" mass="0.5"/>
+    </body>
+    
+    <!-- Lighting -->
+    <light pos="0 0 15" dir="0 0 -1" diffuse="0.8 0.8 0.8" castshadow="true"/>
+  </worldbody>
+</mujoco>
