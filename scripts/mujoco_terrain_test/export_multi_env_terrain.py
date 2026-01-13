@@ -7,7 +7,7 @@ Generates a grid of terrain blocks following IsaacLab's proportion-based distrib
 - parkour_hurdle: 20%  
 - parkour_flat: 20%
 - parkour_step: 20%
-- parkour: 20% (inclined stones)
+- parkour_beam: 20% (suspended overhead beams - robot must duck under)
 
 All obstacles are CENTER-ALIGNED (no Y-axis random offset).
 
@@ -28,13 +28,14 @@ VERTICAL_SCALE = 0.005   # height scale
 TERRAIN_SIZE = (16.0, 4.0)  # (length_x, width_y) per env block
 NUM_GOALS = 10  # Number of goals/obstacles per terrain (matching IsaacLab)
 
-# Terrain type proportions (matching EXTREME_PARKOUR_TERRAINS_CFG)
+# Terrain type proportions (matching EXTREME_PARKOUR_TERRAINS_CFG with beam instead of slope)
+# NOTE: Order determines column layout. Beam is placed in middle (column 2) for better visibility
 TERRAIN_PROPORTIONS = {
     "parkour_gap": 0.2,
     "parkour_hurdle": 0.2,
-    "parkour_flat": 0.2,
+    "parkour_beam": 0.2,  # Beam in middle column (was flat)
     "parkour_step": 0.2,
-    "parkour": 0.2,
+    "parkour_flat": 0.2,  # Flat moved to last column (was beam)
 }
 
 
@@ -64,10 +65,10 @@ class TerrainConfig:
         self.step_x_range = (0.3, 1.5)
         self.step_half_valid_width = (0.5, 1.0)
         
-        # Parkour (inclined stones) params
-        self.parkour_pit_depth = (0.2, 1.0)
-        self.parkour_stone_width = 1.0
-        self.parkour_last_stone_len = 1.6
+        # Beam terrain params (replaces parkour slope)
+        self.beam_x_range = (1.2, 2.2)
+        self.beam_half_valid_width = (0.5, 0.8)
+        self.beam_depth = 0.2  # Vertical thickness of beam
 
 
 def add_roughness(height_field: np.ndarray, cfg: TerrainConfig, difficulty: float) -> np.ndarray:
@@ -243,90 +244,87 @@ def generate_step_terrain(cfg: TerrainConfig, difficulty: float) -> np.ndarray:
     return height_field
 
 
-def generate_parkour_terrain(cfg: TerrainConfig, difficulty: float) -> np.ndarray:
+def generate_beam_terrain(cfg: TerrainConfig, difficulty: float) -> tuple:
     """
-    Generate parkour terrain with inclined stones - CENTER ALIGNED.
-    Based on parkour_terrain from extreme_parkour_terrians.py
+    Generate beam terrain - CENTER ALIGNED suspended overhead beams.
+    
+    Beams are represented as elevated obstacles that the robot must pass under.
+    Returns both the heightfield and beam box positions.
+    
+    Returns:
+        height_field: Ground heightfield
+        beam_boxes: List of (x, y, z_relative, size_x, size_y, size_z) for suspended beams
+                   z_relative is height above the flat ground (in heightfield meters, i.e. 0 = flat ground)
     """
     width_pixels = int(cfg.size[0] / cfg.horizontal_scale)
     length_pixels = int(cfg.size[1] / cfg.horizontal_scale)
-    
-    pit_depth = -round(np.random.uniform(*cfg.parkour_pit_depth) / cfg.vertical_scale)
-    height_field = np.full((width_pixels, length_pixels), pit_depth, dtype=np.float32)
+    height_field = np.zeros((width_pixels, length_pixels))
     
     mid_y = length_pixels // 2
     
-    # Stone parameters
-    stone_len_min = 0.9 - 0.3 * difficulty
-    stone_len_max = 1.0 - 0.2 * difficulty
-    stone_len = np.random.uniform(stone_len_min, stone_len_max)
-    stone_len = 2 * round(stone_len / 2.0, 1)
-    stone_len_pixels = round(stone_len / cfg.horizontal_scale)
+    # Beam parameters
+    beam_length = 0.3 + 0.3 * difficulty
+    beam_length_pixels = round(beam_length / cfg.horizontal_scale)
     
-    stone_width = round(cfg.parkour_stone_width / cfg.horizontal_scale)
-    last_stone_len = round(cfg.parkour_last_stone_len / cfg.horizontal_scale)
+    # Beam clearance (height above ground) - robot must duck under
+    # Increased height (0.5-0.7m) to ensure beams are clearly visible above terrain
+    beam_height_min = 0.5 - 0.1 * difficulty
+    beam_height_max = 0.7 - 0.1 * difficulty
     
-    incline_height = 0.25 * difficulty
-    incline_height_pixels = round(incline_height / cfg.vertical_scale)
+    half_valid_width = round(np.random.uniform(*cfg.beam_half_valid_width) / cfg.horizontal_scale)
     
-    x_range_min = -0.1
-    x_range_max = 0.1 + 0.3 * difficulty
+    dis_x_min = round(cfg.beam_x_range[0] / cfg.horizontal_scale)
+    dis_x_max = round(cfg.beam_x_range[1] / cfg.horizontal_scale)
     
-    # Platform
     platform_len = round(cfg.platform_len / cfg.horizontal_scale)
     platform_height = round(cfg.platform_height / cfg.vertical_scale)
-    height_field[0:platform_len, :] = platform_height
     
-    dis_x_min = stone_len_pixels + round(x_range_min / cfg.horizontal_scale)
-    dis_x_max = stone_len_pixels + round(x_range_max / cfg.horizontal_scale)
+    # Flat ground for beam terrain (platform_height = 0 in heightfield units)
+    height_field[:] = platform_height
     
-    dis_x = platform_len - np.random.randint(max(1, dis_x_min), max(2, dis_x_max)) + stone_len_pixels // 2
-    dis_z = 0
+    # Store the ground height in meters (this is the reference for beam placement)
+    ground_height_m = platform_height * cfg.vertical_scale  # = 0.0m for flat ground
     
-    num_stones = NUM_GOALS - 2
-    for i in range(num_stones):
-        dis_x += np.random.randint(max(1, dis_x_min), max(2, dis_x_max))
+    dis_x = platform_len
+    beam_boxes = []
+    
+    num_beams = NUM_GOALS - 2
+    for i in range(num_beams):
+        rand_x = np.random.randint(dis_x_min, dis_x_max)
+        dis_x += rand_x
         
-        if dis_x >= width_pixels - last_stone_len:
+        if dis_x >= width_pixels - platform_len:
             break
         
-        # Inclined stone centered at mid_y (no Y offset)
-        if i == num_stones - 1:
-            # Last stone (larger)
-            heights = np.tile(np.linspace(-incline_height_pixels, incline_height_pixels, stone_width), 
-                            (last_stone_len, 1))
-            x_start = max(0, dis_x - last_stone_len // 2)
-            x_end = min(width_pixels, dis_x + last_stone_len // 2)
-            y_start = max(0, mid_y - stone_width // 2)
-            y_end = min(length_pixels, mid_y + stone_width // 2)
-            height_field[x_start:x_end, y_start:y_end] = heights[:x_end-x_start, :y_end-y_start].astype(int) + dis_z
-        else:
-            heights = np.tile(np.linspace(-incline_height_pixels, incline_height_pixels, stone_width), 
-                            (stone_len_pixels, 1))
-            x_start = max(0, dis_x - stone_len_pixels // 2)
-            x_end = min(width_pixels, dis_x + stone_len_pixels // 2)
-            y_start = max(0, mid_y - stone_width // 2)
-            y_end = min(length_pixels, mid_y + stone_width // 2)
-            height_field[x_start:x_end, y_start:y_end] = heights[:x_end-x_start, :y_end-y_start].astype(int) + dis_z
-    
-    # End platform
-    final_platform_start = dis_x + last_stone_len // 2 + round(0.05 / cfg.horizontal_scale)
-    if final_platform_start < width_pixels:
-        height_field[final_platform_start:, :] = platform_height
+        # Calculate beam parameters
+        clearance = np.random.uniform(beam_height_min, beam_height_max)
+        
+        # Beam dimensions in meters
+        beam_x_m = dis_x * cfg.horizontal_scale
+        beam_y_m = mid_y * cfg.horizontal_scale
+        # beam_z_m is relative to flat ground (ground_height_m = 0)
+        # clearance is the distance from ground to bottom of beam
+        # beam center is at ground_height + clearance + half beam thickness
+        beam_z_relative = ground_height_m + clearance + cfg.beam_depth / 2
+        beam_size_x = beam_length_pixels * cfg.horizontal_scale
+        beam_size_y = (half_valid_width * 2 + round(0.4 / cfg.horizontal_scale)) * cfg.horizontal_scale
+        beam_size_z = cfg.beam_depth
+        
+        beam_boxes.append((beam_x_m, beam_y_m, beam_z_relative, beam_size_x, beam_size_y, beam_size_z))
     
     height_field = add_roughness(height_field, cfg, difficulty)
-    return height_field
+    return height_field, beam_boxes
 
 
 # ============================================================================
 # Terrain type generator mapping
 # ============================================================================
 TERRAIN_GENERATORS = {
-    "parkour_gap": lambda cfg, d: generate_gap_terrain(cfg, d),
-    "parkour_hurdle": lambda cfg, d: generate_hurdle_terrain(cfg, d, apply_flat=False),
-    "parkour_flat": lambda cfg, d: generate_hurdle_terrain(cfg, d, apply_flat=True),
-    "parkour_step": lambda cfg, d: generate_step_terrain(cfg, d),
-    "parkour": lambda cfg, d: generate_parkour_terrain(cfg, d),
+    "parkour_gap": lambda cfg, d: (generate_gap_terrain(cfg, d), []),
+    "parkour_hurdle": lambda cfg, d: (generate_hurdle_terrain(cfg, d, apply_flat=False), []),
+    "parkour_flat": lambda cfg, d: (generate_hurdle_terrain(cfg, d, apply_flat=True), []),
+    "parkour_step": lambda cfg, d: (generate_step_terrain(cfg, d), []),
+    "parkour_beam": lambda cfg, d: generate_beam_terrain(cfg, d),
 }
 
 
@@ -335,13 +333,14 @@ def generate_multi_env_terrain(
     num_rows: int,
     num_cols: int,
     difficulty_range: tuple = (0.0, 1.0),
-) -> tuple[np.ndarray, list]:
+) -> tuple:
     """
     Generate a grid of terrain blocks following IsaacLab's curriculum layout.
     
     Returns:
         combined_terrain: 2D height field array
         terrain_info: List of (row, col, terrain_type, difficulty) for each block
+        all_beams: List of beam box tuples for MuJoCo scene
     """
     width_pixels_per_env = int(cfg.size[0] / cfg.horizontal_scale)
     length_pixels_per_env = int(cfg.size[1] / cfg.horizontal_scale)
@@ -351,6 +350,7 @@ def generate_multi_env_terrain(
     
     combined = np.zeros((total_width, total_length), dtype=np.float32)
     terrain_info = []
+    all_beams = []  # Store all beam boxes
     
     # Calculate column assignments based on proportions
     terrain_types = list(TERRAIN_PROPORTIONS.keys())
@@ -379,8 +379,8 @@ def generate_multi_env_terrain(
             terrain_type = col_terrain_types[col]
             generator = TERRAIN_GENERATORS[terrain_type]
             
-            # Generate terrain block
-            block = generator(cfg, difficulty)
+            # Generate terrain block (returns tuple: heightfield, beam_boxes)
+            block, beams = generator(cfg, difficulty)
             
             # Place in combined terrain
             row_start = row * width_pixels_per_env
@@ -390,8 +390,14 @@ def generate_multi_env_terrain(
             
             combined[row_start:row_end, col_start:col_end] = block
             terrain_info.append((row, col, terrain_type, difficulty))
+            
+            # Handle beam boxes - offset to global position
+            for (bx, by, bz, sx, sy, sz) in beams:
+                global_x = bx + row * cfg.size[0]
+                global_y = by + col * cfg.size[1]
+                all_beams.append((global_x, global_y, bz, sx, sy, sz))
     
-    return combined, terrain_info
+    return combined, terrain_info, all_beams
 
 
 def height_field_to_png(height_field: np.ndarray, output_path: str, vertical_scale: float) -> tuple:
@@ -423,17 +429,51 @@ def create_mujoco_scene(
     max_height: float,
     num_rows: int,
     num_cols: int,
+    beams: list = None,
 ):
-    """Create MuJoCo XML scene with the combined terrain."""
+    """
+    Create MuJoCo XML scene with the combined terrain and beam obstacles.
+    
+    MuJoCo hfield coordinate system:
+    - hfield size = (half_x, half_y, height_range, base)
+    - PNG normalized to [0,1], where 0=black (min height), 1=white (max height)
+    - World z = geom_pos_z + base + normalized * height_range
+    
+    For flat ground (heightfield value = 0m):
+    - normalized_flat = (0 - min_height) / height_range
+    - flat_world_z = geom_pos_z + base + normalized_flat * height_range
+                   = (-min_height) + base + (0 - min_height) / height_range * height_range
+                   = (-min_height) + base + (0 - min_height)
+                   = -min_height + base - min_height
+                   = base - 2*min_height  (if min_height < 0)
+    
+    Beams z_relative is relative to flat ground (0m in heightfield), so:
+    - beam_world_z = flat_world_z + z_relative
+    """
     half_x = total_width / 2
     half_y = total_length / 2
     height_range = max_height - min_height
     base_thickness = 0.1
     
+    # Calculate flat ground world z coordinate
+    # Flat ground has heightfield value = 0m
+    # In PNG: normalized_flat = (0 - min_height) / height_range
+    # In MuJoCo: flat_world_z = geom_pos_z + base + normalized_flat * height_range
+    geom_pos_z = -min_height
+    normalized_flat = (0 - min_height) / height_range if height_range > 0 else 0
+    flat_world_z = geom_pos_z + base_thickness + normalized_flat * height_range
+    
+    print(f"\nMuJoCo coordinate calculation:")
+    print(f"  min_height: {min_height:.4f}m, max_height: {max_height:.4f}m")
+    print(f"  height_range: {height_range:.4f}m")
+    print(f"  geom_pos_z: {geom_pos_z:.4f}m")
+    print(f"  normalized_flat: {normalized_flat:.4f}")
+    print(f"  flat_world_z: {flat_world_z:.4f}m (this is where z=0 heightfield maps to)")
+    
     hfield_filename = os.path.basename(hfield_path)
     
     xml_content = f'''<?xml version="1.0" encoding="utf-8"?>
-<mujoco model="multi_env_parkour_terrain">
+<mujoco model="multi_env_parkour_terrain_with_beams">
   <compiler angle="radian" autolimits="true"/>
   
   <option gravity="0 0 -9.81" timestep="0.002"/>
@@ -453,15 +493,28 @@ def create_mujoco_scene(
     
     <texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.8" rgb2="0 0 0" width="512" height="3072"/>
     <material name="terrain_mat" rgba="0.55 0.5 0.45 1" specular="0.1"/>
+    <material name="beam_mat" rgba="0.6 0.3 0.2 1" specular="0.3"/>
     <material name="ball_mat" rgba="0.9 0.2 0.2 1"/>
   </asset>
   
   <worldbody>
     <!-- Terrain -->
     <geom name="terrain" type="hfield" hfield="parkour_terrain" 
-          pos="0 0 {-min_height:.4f}" material="terrain_mat"/>
+          pos="0 0 {geom_pos_z:.4f}" material="terrain_mat"/>'''
     
-    <!-- Test balls - one per row at the start -->'''
+    # Add beam obstacles
+    if beams:
+        for i, (bx, by, bz_relative, sx, sy, sz) in enumerate(beams):
+            # Convert to MuJoCo world coordinates (centered at origin)
+            mx = bx - half_x
+            my = by - half_y
+            # bz_relative is relative to flat ground (0m in heightfield)
+            # Convert to world z by adding flat_world_z
+            mz = flat_world_z + bz_relative
+            xml_content += f'''
+    <!-- Beam {i} -->
+    <geom name="beam_{i}" type="box" pos="{mx:.3f} {my:.3f} {mz:.3f}" 
+          size="{sx/2:.3f} {sy/2:.3f} {sz/2:.3f}" material="beam_mat"/>'''
     
     # Add test balls for each row
     env_width = TERRAIN_SIZE[0]
@@ -487,7 +540,7 @@ def create_mujoco_scene(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Export multi-env parkour terrain for MuJoCo")
+    parser = argparse.ArgumentParser(description="Export multi-env parkour terrain for MuJoCo (with beam)")
     parser.add_argument("--num_rows", type=int, default=3, help="Number of difficulty levels (rows)")
     parser.add_argument("--num_cols", type=int, default=5, help="Number of terrain columns")
     parser.add_argument("--difficulty_min", type=float, default=0.3, help="Minimum difficulty")
@@ -504,7 +557,7 @@ def main():
     cfg = TerrainConfig()
     
     print("=" * 70)
-    print("Multi-Env Parkour Terrain Export (IsaacLab-style)")
+    print("Multi-Env Parkour Terrain Export (with BEAM terrain)")
     print("=" * 70)
     print(f"\nGrid: {args.num_rows} rows × {args.num_cols} cols = {args.num_rows * args.num_cols} envs")
     print(f"Each env: {cfg.size[0]}m × {cfg.size[1]}m")
@@ -513,7 +566,7 @@ def main():
     print(f"Obstacles: CENTER-ALIGNED (no Y-axis random offset)")
     
     # Generate terrain
-    combined, terrain_info = generate_multi_env_terrain(
+    combined, terrain_info, beams = generate_multi_env_terrain(
         cfg,
         num_rows=args.num_rows,
         num_cols=args.num_cols,
@@ -525,6 +578,7 @@ def main():
     
     print(f"\nGenerated terrain shape: {combined.shape}")
     print(f"Height range: {combined.min() * cfg.vertical_scale:.3f}m to {combined.max() * cfg.vertical_scale:.3f}m")
+    print(f"Number of beam obstacles: {len(beams)}")
     
     # Export
     hfield_path = os.path.join(output_dir, "multi_env_terrain_heightmap.png")
@@ -535,7 +589,8 @@ def main():
         scene_path, hfield_path,
         total_width, total_length,
         min_height, max_height,
-        args.num_rows, args.num_cols
+        args.num_rows, args.num_cols,
+        beams
     )
     
     print(f"\nExported files:")

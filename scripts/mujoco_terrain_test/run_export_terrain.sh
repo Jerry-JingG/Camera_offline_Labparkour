@@ -18,8 +18,8 @@ DIFFICULTY_MAX=0.8  # 最高难度（最后一行）
 # 随机种子（改变种子会生成不同的地形）
 SEED=42
 
-# 是否自动打开 MuJoCo 查看器
-AUTO_VIEW=true
+# 是否自动运行测试程序
+AUTO_TEST=true
 # =================================================
 
 # 切换到脚本所在目录
@@ -36,7 +36,8 @@ echo "  Difficulty: ${DIFFICULTY_MIN} - ${DIFFICULTY_MAX}"
 echo "  Seed:       ${SEED}"
 echo ""
 
-# 生成地形
+# Step 1: 生成地形
+echo "Step 1: Generating terrain..."
 python export_multi_env_terrain.py \
     --num_rows "$NUM_ROWS" \
     --num_cols "$NUM_COLS" \
@@ -49,10 +50,11 @@ if [ $? -eq 0 ]; then
     echo ""
     echo "✅ Terrain generation complete!"
     
-    if [ "$AUTO_VIEW" = true ]; then
+    # Step 2: 运行测试程序
+    if [ "$AUTO_TEST" = true ]; then
         echo ""
-        echo "Opening MuJoCo viewer..."
-        python -m mujoco.viewer output/multi_env_terrain_scene.xml
+        echo "Step 2: Running MuJoCo collision test..."
+        python test_mujoco_hfield.py
     fi
 else
     echo ""

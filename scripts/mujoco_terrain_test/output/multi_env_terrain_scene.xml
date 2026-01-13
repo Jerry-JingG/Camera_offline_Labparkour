@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<mujoco model="multi_env_parkour_terrain">
+<mujoco model="multi_env_parkour_terrain_with_beams">
   <compiler angle="radian" autolimits="true"/>
   
   <option gravity="0 0 -9.81" timestep="0.002"/>
@@ -15,19 +15,87 @@
     <!-- Multi-env terrain height field -->
     <hfield name="parkour_terrain" 
             file="multi_env_terrain_heightmap.png"
-            size="24.0 10.0 2.3466 0.1"/>
+            size="24.0 10.0 2.2020 0.1"/>
     
     <texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.8" rgb2="0 0 0" width="512" height="3072"/>
     <material name="terrain_mat" rgba="0.55 0.5 0.45 1" specular="0.1"/>
+    <material name="beam_mat" rgba="0.6 0.3 0.2 1" specular="0.3"/>
     <material name="ball_mat" rgba="0.9 0.2 0.2 1"/>
   </asset>
   
   <worldbody>
     <!-- Terrain -->
     <geom name="terrain" type="hfield" hfield="parkour_terrain" 
-          pos="0 0 0.7750" material="terrain_mat"/>
-    
-    <!-- Test balls - one per row at the start -->
+          pos="0 0 0.6300" material="terrain_mat"/>
+    <!-- Beam 0 -->
+    <geom name="beam_0" type="box" pos="-21.840 0.000 2.065" 
+          size="0.200 1.000 0.100" material="beam_mat"/>
+    <!-- Beam 1 -->
+    <geom name="beam_1" type="box" pos="-20.480 0.000 1.953" 
+          size="0.200 1.000 0.100" material="beam_mat"/>
+    <!-- Beam 2 -->
+    <geom name="beam_2" type="box" pos="-18.880 0.000 1.960" 
+          size="0.200 1.000 0.100" material="beam_mat"/>
+    <!-- Beam 3 -->
+    <geom name="beam_3" type="box" pos="-17.120 0.000 1.960" 
+          size="0.200 1.000 0.100" material="beam_mat"/>
+    <!-- Beam 4 -->
+    <geom name="beam_4" type="box" pos="-15.120 0.000 1.951" 
+          size="0.200 1.000 0.100" material="beam_mat"/>
+    <!-- Beam 5 -->
+    <geom name="beam_5" type="box" pos="-13.440 0.000 2.032" 
+          size="0.200 1.000 0.100" material="beam_mat"/>
+    <!-- Beam 6 -->
+    <geom name="beam_6" type="box" pos="-11.840 0.000 2.075" 
+          size="0.200 1.000 0.100" material="beam_mat"/>
+    <!-- Beam 7 -->
+    <geom name="beam_7" type="box" pos="-10.000 0.000 1.955" 
+          size="0.200 1.000 0.100" material="beam_mat"/>
+    <!-- Beam 8 -->
+    <geom name="beam_8" type="box" pos="-5.200 0.000 1.997" 
+          size="0.240 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 9 -->
+    <geom name="beam_9" type="box" pos="-4.000 0.000 2.039" 
+          size="0.240 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 10 -->
+    <geom name="beam_10" type="box" pos="-2.400 0.000 2.082" 
+          size="0.240 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 11 -->
+    <geom name="beam_11" type="box" pos="-0.480 0.000 2.073" 
+          size="0.240 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 12 -->
+    <geom name="beam_12" type="box" pos="1.360 0.000 2.068" 
+          size="0.240 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 13 -->
+    <geom name="beam_13" type="box" pos="3.200 0.000 2.000" 
+          size="0.240 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 14 -->
+    <geom name="beam_14" type="box" pos="4.640 0.000 1.990" 
+          size="0.240 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 15 -->
+    <geom name="beam_15" type="box" pos="6.160 0.000 1.917" 
+          size="0.240 0.760 0.100" material="beam_mat"/>
+    <!-- Beam 16 -->
+    <geom name="beam_16" type="box" pos="10.880 0.000 1.992" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 17 -->
+    <geom name="beam_17" type="box" pos="12.240 0.000 1.989" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 18 -->
+    <geom name="beam_18" type="box" pos="13.680 0.000 1.924" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 19 -->
+    <geom name="beam_19" type="box" pos="15.840 0.000 1.993" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 20 -->
+    <geom name="beam_20" type="box" pos="17.760 0.000 1.918" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 21 -->
+    <geom name="beam_21" type="box" pos="19.920 0.000 2.046" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
+    <!-- Beam 22 -->
+    <geom name="beam_22" type="box" pos="22.080 0.000 1.888" 
+          size="0.280 0.840 0.100" material="beam_mat"/>
     <body name="test_ball_0" pos="-23.00 0.00 0.5">
       <freejoint/>
       <geom type="sphere" size="0.08" material="ball_mat" mass="0.5"/>
