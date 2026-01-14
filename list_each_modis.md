@@ -50,3 +50,7 @@ commit9&10:
 
 在collect与play_student中都添加了相机掉线任务，并在collect.py中添加了深度图可视化逻辑
 现在问题是训练效果不太好，应该是加了掉线之后任务比较难，需要增大数据量与训练时间
+
+commit11:
+merge yky的 wandb&train_dataset(txl_memory)到我的工作区。txl.py改了一行代码以调整为transformerxl原文的记忆更新逻辑
+dropout_manager添加了相机和感知的混合掉线。效果一般

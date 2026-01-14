@@ -14,7 +14,7 @@ NUM_ENVS=64                                                    # --num_envs：�
 TOTAL_STEPS=5120                                               # --total_steps：总采集步数（一次 step 全部 env 同步计数）
 SHARD_SIZE=1024                                                # --shard_size：每个数据分片包含的 step 数
 
-OUTPUT_DIR="outputs/datasets/teacher_cam/offline_collection1"                      # --out：数据输出目录
+OUTPUT_DIR="outputs/datasets/teacher_cam/collection_clean1"                      # --out：数据输出目录
 DEPTH_ENCODER_CKPT=""                                          # --depth-encoder-checkpoint：学生深度编码器权重（可为空）
 DATASET_FORMAT="npz"                                           # --dataset-format：数据格式，目前仅支持 npz
 DEPTH_DTYPE="float32"                                          # --depth-dtype：深度图保存精度（float32 或 uint16）
@@ -96,11 +96,11 @@ COLLECT_CMD=("${PYTHON_BIN}" "scripts/rsl_rl/collect.py"
     "--video_length" "${VIDEO_LENGTH}"
 )
 
-if [[ -n "${DEBUG_VIS}" ]]; then
+if [[ "${DEBUG_VIS}" == true ]]; then
     COLLECT_CMD+=("--debug_vis")
 fi
 
-if [[ -n "${USE_DROPOUT}" ]]; then
+if [[ "${USE_DROPOUT}" == true ]]; then
     COLLECT_CMD+=("--use_dropout")
 fi
 

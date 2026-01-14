@@ -1,20 +1,16 @@
 """
-一般的 transformer 网络训练时接收一个 sequence 的输入然后对这一整个 sequence 做输出，并且对一整个 sequence 的输出做监督
-这相当于执行了 sequence_length 次 inference
-由于 transformerxl 是因果注意力的，序列的前几个输出也相当于是 sequence 没有满就输出了的
-所以即使transformer是sequence by sequence训练的, 它可以学习到输入长度不足sequence_length时的输出
+Stateful (TransformerXL Memory-Based) Inference Script - Optimized Vectorized Version
 """
 
 from __future__ import annotations
 
-from collections import deque
 import argparse
 import os
 import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import importlib.util
 import numpy as np
 
@@ -32,7 +28,7 @@ if PARKOUR_TASKS_ROOT not in sys.path:
 
 import cli_args  # isort: skip
 
-# Load MultiModalStudentPolicy directly from the training script path to avoid name collisions with ROS packages.
+# Load MultiModalStudentPolicy directly
 TRAIN_STUDENT_PATH = Path(__file__).resolve().parent / "train_student_from_dataset.py"
 _spec = importlib.util.spec_from_file_location("train_student_from_dataset", TRAIN_STUDENT_PATH)
 if _spec is None or _spec.loader is None:
@@ -70,6 +66,7 @@ def load_student_policy_for_play(
     prop_hist_len: int,
     depth_hist_len: int,
     device: torch.device,
+    mem_len: int = 64,
 ) -> Tuple[MultiModalStudentPolicy, Dict[str, object]]:
     """Load a trained student policy and associated metadata for playback."""
     payload = torch.load(checkpoint_path, map_location=device)
@@ -91,7 +88,7 @@ def load_student_policy_for_play(
         "num_layers": 3,
         "num_heads": 4,
         "d_inner": 256,
-        "mem_len": 64,
+        "mem_len": mem_len,
         "dropout": 0.1,
         "attn_dropout": 0.1,
     }
@@ -120,9 +117,12 @@ def load_student_policy_for_play(
 
 class StudentOnlineRunner:
     """
-    上一个版本直接实现了使用memory的transformerxl的学生策略play脚本, 但是现在还没训练过使用mem的学生策略
-    先实现一版像一般的transformer decoder那样推理的脚本, 后面再改
-    对于一般的transformer, 它的inference的输入是一个deque序列 (即使是一般的transformer, 它的训练和inference也是不同的)
+    Vectorized Student Runner with TransformerXL Memory.
+
+    This version:
+    1. Uses tensors for history buffers (no deques/loops).
+    2. Uses Batched Mems (List[Tensor]) instead of List[List[Tensor]].
+    3. Directly calls model.forward_with_mems.
     """
 
     def __init__(
@@ -134,105 +134,86 @@ class StudentOnlineRunner:
         depth_hist_len: int,
         camera_resolution: Tuple[int, int],
         device: torch.device,
-        sequence_length: int = 16,
     ) -> None:
         self.model = model
         self.num_envs = num_envs
-        self.proprio_dim = proprio_dim
         self.prop_hist_len = prop_hist_len
         self.depth_hist_len = depth_hist_len
-        self.camera_resolution = camera_resolution
         self.device = device
-        self.sequence_length = sequence_length
-        # self.num_layers = len(self.model.temporal_model.layers)
 
-        self.prop_histories: List[deque] = [deque(maxlen=prop_hist_len) for _ in range(num_envs)]
-        self.depth_histories: List[deque] = [deque(maxlen=depth_hist_len) for _ in range(num_envs)]
+        # History Buffer: 行为类似deque, 不过现在使用np.roll实现
+        self.prop_histories = torch.zeros(
+            num_envs, prop_hist_len, proprio_dim,
+            dtype=torch.float32, device=device
+        )
+        self.depth_histories = torch.zeros(
+            num_envs, depth_hist_len, *camera_resolution,
+            dtype=torch.float32, device=device
+        )
 
-        self.prop_seq_buffers = [deque(maxlen=sequence_length) for _ in range(num_envs)]
-        self.depth_seq_buffers = [deque(maxlen=sequence_length) for _ in range(num_envs)]
-
-        self.reset()
+        # TransformerXL Memory, Shape: List[Tensor], where each Tensor is [Num_Envs, Mem_Len, D_Model]
+        self.mems: Optional[List[torch.Tensor]] = None
 
     def reset(self) -> None:
-        """和train_student_from_dataset一样, 对prop_histories和depth_histories初始化时进行了填零操作, 这样第一个环境步transformerxl就可以输出action"""
-        for i in range(self.num_envs):
-            self.prop_histories[i].clear()
-            self.depth_histories[i].clear()
-            self.prop_seq_buffers[i].clear()
-            self.depth_seq_buffers[i].clear()
-
-            for _ in range(self.prop_hist_len):
-                self.prop_histories[i].append(
-                    torch.zeros(self.proprio_dim, device=self.device)
-                )
-            for _ in range(self.depth_hist_len):
-                self.depth_histories[i].append(
-                    torch.zeros(
-                        *self.camera_resolution,
-                        device=self.device,
-                    )
-                )
+        """Reset all environments."""
+        self.prop_histories.zero_()
+        self.depth_histories.zero_()
+        # Directly set to None. TransformerXLTemporal handles it automatically.
+        self.mems = None
 
     def reset_done(self, done_mask: torch.Tensor) -> None:
-        for env_id, done in enumerate(done_mask):
-            if bool(done):
-                self.prop_histories[env_id].clear()
-                self.depth_histories[env_id].clear()
-                # self.prop_seq_buffers[env_id].clear()
-                # self.depth_seq_buffers[env_id].clear()
+        """
+        Reset histories and memories for done environments.
+        Args:
+            done_mask: Boolean tensor of shape [num_envs]
+        """
+        if not done_mask.any():
+            return
 
-                for _ in range(self.prop_hist_len):
-                    self.prop_histories[env_id].append(
-                        torch.zeros(self.proprio_dim, device=self.device)
-                    )
-                for _ in range(self.depth_hist_len):
-                    self.depth_histories[env_id].append(
-                        torch.zeros(
-                            *self.camera_resolution,
-                            device=self.device,
-                        )
-                    )
+        self.prop_histories[done_mask] = 0
+        self.depth_histories[done_mask] = 0
+
+        if self.mems is not None:
+            for i in range(len(self.mems)):
+                self.mems[i][done_mask] = 0
 
     def act(
         self,
-        obs_prop: torch.Tensor,  # [num_envs, proprio_dim]
+        obs_prop: torch.Tensor,     # [num_envs, proprio_dim]
         depth_image: torch.Tensor,  # [num_envs, H, W] or [num_envs, 1, H, W]
     ) -> torch.Tensor:
         """
-        Update histories and compute student actions for all envs.
-        Returns a tensor of shape [num_envs, action_dim].
+        Perform one inference step using cached memory.
         """
         obs_prop = obs_prop.to(self.device)
         depth_image = depth_image.to(self.device)
-        # actions = torch.zeros(self.num_envs, self.model.action_head.action_dim, device=self.device)
 
         if depth_image.dim() == 4 and depth_image.shape[1] == 1:
             depth_image = depth_image.squeeze(1)
 
-        prop_seqs = []
-        depth_seqs = []
+        self.prop_histories = torch.roll(self.prop_histories, -1, dims=1)
+        self.depth_histories = torch.roll(self.depth_histories, -1, dims=1)
 
-        for env_id in range(self.num_envs):
-            self.prop_histories[env_id].append(obs_prop[env_id])
-            self.depth_histories[env_id].append(depth_image[env_id])
-            prop_stack = torch.cat(list(self.prop_histories[env_id]), dim=0)
-            depth_stack = torch.stack(list(self.depth_histories[env_id]), dim=0)
-            self.prop_seq_buffers[env_id].append(prop_stack)
-            self.depth_seq_buffers[env_id].append(depth_stack)
+        self.prop_histories[:, -1, :] = obs_prop
+        self.depth_histories[:, -1, :, :] = depth_image
 
-            prop_seqs.append(torch.stack(list(self.prop_seq_buffers[env_id]), dim=0))
-            depth_seqs.append(torch.stack(list(self.depth_seq_buffers[env_id]), dim=0))
+        # Prepare inputs for the model
+        # 1. Flatten proprio history: [B, Hist, Dim] -> [B, Hist*Dim]
+        # 2. Add Sequence dimension S=1: [B, S=1, Features]
+        prop_input = self.prop_histories.view(self.num_envs, -1).unsqueeze(1)
 
-        prop_batch = torch.stack(prop_seqs)      # [B, S, P]
-        depth_batch = torch.stack(depth_seqs)    # [B, S, D, H, W]
+        # Depth Input: [B, S=1, Hist, H, W]
+        depth_input = self.depth_histories.unsqueeze(1)
 
+        # [Answer 4] Direct Model Call
         with torch.no_grad():
-            pred = self.model(prop_batch, depth_batch)  # [B, S, A]
+            actions, self.mems = self.model.forward_with_mems(
+                prop_input,
+                depth_input,
+                mems=self.mems
+            )
 
-        actions = pred[:, -1]
-
-        return actions
+        return actions.squeeze(1)  # Remove Sequence dim -> [B, Action_Dim]
 
 
 def parse_args_play() -> argparse.Namespace:
@@ -248,14 +229,9 @@ def parse_args_play() -> argparse.Namespace:
     parser.add_argument("--num_envs", type=int, default=8, help="Number of parallel environments.")
     parser.add_argument("--prop_hist_len", type=int, default=3, help="History length for proprio tokens.")
     parser.add_argument("--depth_hist_len", type=int, default=4, help="History length for depth tokens.")
-    parser.add_argument(
-        "--sequence_length",
-        type=int,
-        default=64,
-        help="Temporal sequence length S for the student TXL during play.",
-    )
+    parser.add_argument("--mem_len", type=int, default=64, help="TransformerXL memory length (S).")
     parser.add_argument("--max_steps", type=int, default=2000, help="Maximum steps to run.")
-    parser.add_argument("--use_dropout", action="store_true", default=False, help="演示相机掉线任务")
+    parser.add_argument("--use_dropout", action="store_true", default=False, help="Simulate camera dropout.")
 
     cli_args.add_rsl_rl_args(parser)
     AppLauncher.add_app_launcher_args(parser)
@@ -319,6 +295,7 @@ def main() -> None:
         prop_hist_len=args.prop_hist_len,
         depth_hist_len=args.depth_hist_len,
         device=device,
+        mem_len=args.mem_len,
     )
     proprio_dim = int(meta["num_prop"])
     camera_resolution = tuple(meta.get("camera_resolution", (58, 87)))
@@ -331,7 +308,6 @@ def main() -> None:
         depth_hist_len=args.depth_hist_len,
         camera_resolution=camera_resolution,  # type: ignore[arg-type]
         device=device,
-        sequence_length=args.sequence_length,
     )
     runner.reset()
 
@@ -356,22 +332,25 @@ def main() -> None:
         depth_image = extras["observations"].get("depth_camera")
         if depth_image is None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
+        obs_prop = obs[:, :proprio_dim]
 
         if dropout_manager:
             dropout_manager.reset_env(dones_bool)
-            dropout_manager.update(depth_image)
-
-        obs_prop = obs[:, :proprio_dim]
+            dropout_manager.update(depth_image=depth_image, obs_prop=obs_prop)
 
         student_action = runner.act(obs_prop, depth_image)
+
         if step % 50 == 0:
             try:
                 mean_norm = student_action.norm(dim=-1).mean().item()
             except Exception:
                 mean_norm = float("nan")
             print(f"[student_play] step={step} mean_action_norm={mean_norm:.6f}")
+
         obs_next, rews, dones, extras = vec_env.step(student_action)
         dones_bool = dones.squeeze(-1).bool()
+
+        # Vectorized reset for done envs
         if dones_bool.any():
             runner.reset_done(dones_bool)
 

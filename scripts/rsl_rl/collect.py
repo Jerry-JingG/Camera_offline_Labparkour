@@ -241,7 +241,7 @@ def generate_proprio_noise(
 
 def main():  # noqa: C901
     """主入口：加载教师策略、循环采集并落盘。"""
-
+    torch.cuda.empty_cache()
     parser = build_arg_parser()
     args_cli = parser.parse_args()
     if args_cli.video:
@@ -396,131 +396,132 @@ def main():  # noqa: C901
     noise_scale = 0.2
 
     dones_bool = torch.zeros(vec_env.num_envs, device=vec_env.device, dtype=torch.bool)
-    while total_iterations < total_steps:
-        depth_image = extras["observations"].get("depth_camera")
-        if depth_image is None:
-            raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
+    with torch.inference_mode():
+        while total_iterations < total_steps:
+            depth_image = extras["observations"].get("depth_camera")
+            if depth_image is None:
+                raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
 
-        """ observation扰动逻辑 """
-        if args_cli.noised_observation:
-            prop_noise = generate_proprio_noise(
-                obs[:, :num_prop],
-                noise_scale=noise_scale,
-                device=vec_env.device
-            )
-            depth_noise = torch.randn_like(depth_image) * noise_scale
-            use_noise_mask = torch.rand(vec_env.num_envs, device=vec_env.device) < perturb_prob
-            if use_noise_mask.any():
-                obs[:, :num_prop] += (prop_noise * use_noise_mask.unsqueeze(-1))
-                mask_expanded = use_noise_mask.view(vec_env.num_envs, 1, 1)
-                depth_image += (depth_noise * mask_expanded)
-                """image_features的返回值经过了归一化, 范围是(-0.5, 0.5), 所以-0.5才表示深度为0!!!"""
-                depth_image = torch.clamp(depth_image, min=-0.5)
+            """ observation扰动逻辑 """
+            if args_cli.noised_observation:
+                prop_noise = generate_proprio_noise(
+                    obs[:, :num_prop],
+                    noise_scale=noise_scale,
+                    device=vec_env.device
+                )
+                depth_noise = torch.randn_like(depth_image) * noise_scale
+                use_noise_mask = torch.rand(vec_env.num_envs, device=vec_env.device) < perturb_prob
+                if use_noise_mask.any():
+                    obs[:, :num_prop] += (prop_noise * use_noise_mask.unsqueeze(-1))
+                    mask_expanded = use_noise_mask.view(vec_env.num_envs, 1, 1)
+                    depth_image += (depth_noise * mask_expanded)
+                    """image_features的返回值经过了归一化, 范围是(-0.5, 0.5), 所以-0.5才表示深度为0!!!"""
+                    depth_image = torch.clamp(depth_image, min=-0.5)
 
-        if args_cli.use_dropout:
-            dropout_manager.reset_env(dones_bool)
-            dropout_manager.update(depth_image)
+            if args_cli.debug_vis:
+                # 1. 准备数据: [16, H, W]
+                vis_tensor = depth_image[:16].detach().cpu()
+                if vis_tensor.ndim == 4:
+                    vis_tensor = vis_tensor.squeeze(1)
 
-        if args_cli.debug_vis:
-            # 1. 准备数据: [16, H, W]
-            vis_tensor = depth_image[:16].detach().cpu()
-            if vis_tensor.ndim == 4:
-                vis_tensor = vis_tensor.squeeze(1)
+                depth_images_np = vis_tensor.numpy()
 
-            depth_images_np = vis_tensor.numpy()
+                # 还原可视化: 原数据范围 [-0.5, 0.5]
+                # 加 0.5 变回 [0.0, 1.0] 区间，这样 0m=黑, max=白
+                depth_images_prep = []
+                for img in depth_images_np:
+                    img_display = img + 0.5
+                    depth_images_prep.append(img_display)
 
-            # 还原可视化: 原数据范围 [-0.5, 0.5]
-            # 加 0.5 变回 [0.0, 1.0] 区间，这样 0m=黑, max=白
-            depth_images_prep = []
-            for img in depth_images_np:
-                img_display = img + 0.5
-                depth_images_prep.append(img_display)
+                # 2. 拼接网格
+                rows = []
+                ncols = 4
+                for i in range(0, 16, ncols):
+                    batch = depth_images_prep[i:i+ncols]
+                    # Horizontal Stack
+                    row = np.hstack(batch)
+                    rows.append(row)
 
-            # 2. 拼接网格
-            rows = []
-            ncols = 4
-            for i in range(0, 16, ncols):
-                batch = depth_images_prep[i:i+ncols]
-                # Horizontal Stack
-                row = np.hstack(batch)
-                rows.append(row)
+                # Vertical Stack
+                grid_img = np.vstack(rows)
 
-            # Vertical Stack
-            grid_img = np.vstack(rows)
+                # 放大显示
+                grid_img = cv2.resize(grid_img, (0, 0), fx=3.0, fy=3.0, interpolation=cv2.INTER_NEAREST)
 
-            # 放大显示
-            grid_img = cv2.resize(grid_img, (0, 0), fx=3.0, fy=3.0, interpolation=cv2.INTER_NEAREST)
+                cv2.imshow("Collect Debug (Depth)", grid_img)
+                cv2.waitKey(1)
 
-            cv2.imshow("Collect Debug (Depth)", grid_img)
-            cv2.waitKey(1)
+            obs_prop = obs[:, :num_prop]
+            obs_est = obs.clone()
+            priv_est = estimator(obs_est[:, :num_prop])
+            obs_est[:, priv_start:priv_end] = priv_est
 
-        obs_prop = obs[:, :num_prop]
-        obs_prop_cpu = obs_prop.detach().cpu().numpy().astype(np.float32)
+            if args_cli.use_dropout:
+                dropout_manager.reset_env(dones_bool)
+                dropout_manager.update(depth_image=depth_image, obs_prop=obs_prop)
 
-        obs_est = obs.clone()
-        priv_est = estimator(obs_est[:, :num_prop])
-        obs_est[:, priv_start:priv_end] = priv_est
+            obs_prop_cpu = obs_prop.detach().cpu().numpy().astype(np.float32)
 
-        actions = policy(obs_est, hist_encoding=True)
-        actions_cpu = actions.detach().cpu().numpy().astype(np.float32)
+            actions = policy(obs_est, hist_encoding=True)
+            actions_cpu = actions.detach().cpu().numpy().astype(np.float32)
 
-        """ 对env施加扰动后的动作从而到达特殊状态, 采集未扰动的action作为label """
-        if args_cli.noised_action:
-            # 考虑了向量化环境，生成一个随机掩码，决定哪些环境在这个 step 使用噪声
-            use_noise_mask = torch.rand(vec_env.num_envs, device=vec_env.device) < perturb_prob
-            if use_noise_mask.any():
-                noise = torch.randn_like(actions) * noise_scale
-                # 只对被选中的环境添加噪声
-                actions = actions + (noise * use_noise_mask.unsqueeze(-1))
+            """ 对env施加扰动后的动作从而到达特殊状态, 采集未扰动的action作为label """
+            if args_cli.noised_action:
+                # 考虑了向量化环境，生成一个随机掩码，决定哪些环境在这个 step 使用噪声
+                use_noise_mask = torch.rand(vec_env.num_envs, device=vec_env.device) < perturb_prob
+                if use_noise_mask.any():
+                    noise = torch.randn_like(actions) * noise_scale
+                    # 只对被选中的环境添加噪声
+                    actions = actions + (noise * use_noise_mask.unsqueeze(-1))
 
-        # 环境前进一步，返回新的观测、奖励与终止标记。
-        obs_next, rews, dones, extras = vec_env.step(actions)
-        rews_cpu = rews.detach().cpu().numpy().astype(np.float32)
-        dones_bool = dones.squeeze(-1).bool()
+            # 环境前进一步，返回新的观测、奖励与终止标记。
+            obs_next, rews, dones, extras = vec_env.step(actions)
+            rews_cpu = rews.detach().cpu().numpy().astype(np.float32)
+            dones_bool = dones.squeeze(-1).bool()
 
-        # 将当前步的数据压入缓冲，待达到 shard 后统一写盘。
-        buffer["obs_prop"].append(obs_prop_cpu)
-        buffer["action_teacher"].append(actions_cpu)
-        buffer["reward"].append(rews_cpu)
-        buffer["done"].append(dones_bool.cpu().numpy())
-        buffer["episode_id"].append(episode_ids.detach().cpu().numpy())
-        buffer["step_in_episode"].append(step_in_episode.detach().cpu().numpy())
-        buffer["depth"].append(convert_depth(depth_image, args_cli.depth_dtype, args_cli.depth_scale))
-        buffer["priv_estimate"].append(priv_est.detach().cpu().numpy().astype(np.float32))
+            # 将当前步的数据压入缓冲，待达到 shard 后统一写盘。
+            buffer["obs_prop"].append(obs_prop_cpu)
+            buffer["action_teacher"].append(actions_cpu)
+            buffer["reward"].append(rews_cpu)
+            buffer["done"].append(dones_bool.cpu().numpy())
+            buffer["episode_id"].append(episode_ids.detach().cpu().numpy())
+            buffer["step_in_episode"].append(step_in_episode.detach().cpu().numpy())
+            buffer["depth"].append(convert_depth(depth_image, args_cli.depth_dtype, args_cli.depth_scale))
+            buffer["priv_estimate"].append(priv_est.detach().cpu().numpy().astype(np.float32))
 
-        obs_stats.update(obs_prop_cpu)
-        action_stats.update(actions_cpu)
+            obs_stats.update(obs_prop_cpu)
+            action_stats.update(actions_cpu)
 
-        steps_in_buffer += 1
-        total_iterations += 1
+            steps_in_buffer += 1
+            total_iterations += 1
 
-        step_in_episode += 1
-        reset_mask = dones_bool
-        if reset_mask.any():
-            step_in_episode[reset_mask] = 0
-            num_reset = int(reset_mask.sum().item())
-            new_ids = torch.arange(next_episode_id, next_episode_id + num_reset, device=vec_env.device)
-            episode_ids[reset_mask] = new_ids
-            next_episode_id += num_reset
-            # reset_depth_hidden_states(depth_encoder, reset_mask)
-        # episode_ids[~reset_mask] = episode_ids[~reset_mask]         ？？？？
+            step_in_episode += 1
+            reset_mask = dones_bool
+            if reset_mask.any():
+                step_in_episode[reset_mask] = 0
+                num_reset = int(reset_mask.sum().item())
+                new_ids = torch.arange(next_episode_id, next_episode_id + num_reset, device=vec_env.device)
+                episode_ids[reset_mask] = new_ids
+                next_episode_id += num_reset
+                # reset_depth_hidden_states(depth_encoder, reset_mask)
+            # episode_ids[~reset_mask] = episode_ids[~reset_mask]         ？？？？
 
-        obs = obs_next
+            obs = obs_next
 
-        if (
-            total_iterations % progress_interval == 0
-            or total_iterations == total_steps
-        ):
-            percent = total_iterations / total_steps * 100.0
-            print(
-                f"[collect] 进度：{total_iterations}/{total_steps} ({percent:5.1f}%)",
-                flush=True,
-            )
+            if (
+                total_iterations % progress_interval == 0
+                or total_iterations == total_steps
+            ):
+                percent = total_iterations / total_steps * 100.0
+                print(
+                    f"[collect] 进度：{total_iterations}/{total_steps} ({percent:5.1f}%)",
+                    flush=True,
+                )
 
-        if steps_in_buffer >= args_cli.shard_size:
-            writer.write(buffer)
-            buffer = defaultdict(list)
-            steps_in_buffer = 0
+            if steps_in_buffer >= args_cli.shard_size:
+                writer.write(buffer)
+                buffer = defaultdict(list)
+                steps_in_buffer = 0
 
     if steps_in_buffer > 0:
         writer.write(buffer)
