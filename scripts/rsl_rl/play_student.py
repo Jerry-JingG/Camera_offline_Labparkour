@@ -320,6 +320,7 @@ def main() -> None:
             device=device,
             dt=step_dt,
             prob_start_offline=0.0,
+            prob_cam_offline=0.3,
             online_duration_range=(5.0, 5.0),
             offline_duration_range=(2.0, 2.0)
         )
@@ -333,6 +334,7 @@ def main() -> None:
         if depth_image is None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
         obs_prop = obs[:, :proprio_dim]
+        obs_prop[:, 12] = dones_bool.float()
 
         if dropout_manager:
             dropout_manager.reset_env(dones_bool)

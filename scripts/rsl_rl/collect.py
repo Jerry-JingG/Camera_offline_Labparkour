@@ -460,6 +460,7 @@ def main():  # noqa: C901
                 dropout_manager.reset_env(dones_bool)
                 dropout_manager.update(depth_image=depth_image, obs_prop=obs_prop)
 
+            obs_prop[:, 12] = dones_bool.float()
             obs_prop_cpu = obs_prop.detach().cpu().numpy().astype(np.float32)
 
             actions = policy(obs_est, hist_encoding=True)

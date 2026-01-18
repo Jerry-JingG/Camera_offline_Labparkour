@@ -82,60 +82,67 @@ class SequenceAggregator:
         self.num_prop = num_prop
 
         # 1. History Buffer: 行为类似deque, 不过现在使用np.roll实现
-        self.prop_histories = np.zeros((num_envs, prop_hist_len, num_prop), dtype=np.float32)
-        self.depth_histories = np.zeros((num_envs, depth_hist_len, *depth_shape), dtype=np.float32)
+        self.prop_histories = torch.zeros((num_envs, prop_hist_len, num_prop), dtype=torch.float32)
+        self.depth_histories = torch.zeros((num_envs, depth_hist_len, *depth_shape), dtype=torch.float32)
 
         # 2. Sequence Buffer: 预分配内存，用于存储一个完整的 Sequence Batch
-        self.seq_prop = np.zeros((num_envs, sequence_len, prop_hist_len * num_prop), dtype=np.float32)
-        self.seq_depth = np.zeros((num_envs, sequence_len, depth_hist_len, *depth_shape), dtype=np.float32)
+        self.seq_prop = torch.zeros((num_envs, sequence_len, prop_hist_len * num_prop), dtype=torch.float32)
+        self.seq_depth = torch.zeros((num_envs, sequence_len, depth_hist_len, *depth_shape), dtype=torch.float32)
 
         self.seq_action = None
-        self.seq_done = np.zeros((num_envs, sequence_len), dtype=bool)
+        self.seq_done = torch.zeros((num_envs, sequence_len), dtype=torch.bool)
 
         self.current_seq_step = 0
 
     def reset(self) -> None:
-        self.prop_histories.fill(0)
-        self.depth_histories.fill(0)
+        self.prop_histories.zero_()
+        self.depth_histories.zero_()
 
-        self.seq_prop.fill(0)
-        self.seq_depth.fill(0)
+        self.seq_prop.zero_()
+        self.seq_depth.zero_()
         self.seq_action = None
-        self.seq_done.fill(0)
+        self.seq_done.zero_()
 
         self.current_seq_step = 0
 
-    def push_step(self, obs_prop, depth_frame, teacher_actions, done):
-        # --- 1. 更新历史 (整体左移) ---
-        # 这种向量化操作比对每个 env 使用 deque 快得多
-        self.prop_histories = np.roll(self.prop_histories, -1, axis=1)
-        self.depth_histories = np.roll(self.depth_histories, -1, axis=1)
+    def push_step(self, obs_prop: np.ndarray, depth_frame: np.ndarray, teacher_actions: np.ndarray, done: np.ndarray):
+        """
+        接收 Numpy 数据，转为 Tensor 并更新历史 buffer 和 sequence buffer。
+        """
+        # --- 0. 转换为 Tensor ---
+        obs_prop_t = torch.from_numpy(obs_prop)
+        depth_frame_t = torch.from_numpy(depth_frame)
+        teacher_actions_t = torch.from_numpy(teacher_actions)
+        done_t = torch.from_numpy(done)
 
-        # 填入最新数据 (放在历史窗口的最后)
-        self.prop_histories[:, -1, :] = obs_prop
-        self.depth_histories[:, -1, :, :] = depth_frame
+        # --- 1. 更新历史 (整体左移) ---
+        self.prop_histories = torch.roll(self.prop_histories, -1, dims=1)
+        self.depth_histories = torch.roll(self.depth_histories, -1, dims=1)
+
+        # 填入最新数据
+        self.prop_histories[:, -1, :] = obs_prop_t
+        self.depth_histories[:, -1, :, :] = depth_frame_t
 
         # --- 2. 填入 Sequence Buffer ---
+        idx = self.current_seq_step
+
+        # Lazy Init for actions
+        if self.seq_action is None:
+            action_dim = teacher_actions.shape[-1]
+            self.seq_action = torch.zeros((self.num_envs, self.sequence_len, action_dim), dtype=torch.float32)
+
         # Flatten Proprio: [Num_Envs, Hist_Len, num_prop] -> [Num_Envs, Hist_Len * num_prop]
         current_prop_flat = self.prop_histories.reshape(self.num_envs, -1)
 
-        idx = self.current_seq_step
-        if self.seq_action is None:
-            self.seq_action = np.zeros((self.num_envs, self.sequence_len, teacher_actions.shape[-1]), dtype=np.float32)
-
         self.seq_prop[:, idx] = current_prop_flat
         self.seq_depth[:, idx] = self.depth_histories
-        self.seq_action[:, idx] = teacher_actions
-        self.seq_done[:, idx] = done
+        self.seq_action[:, idx] = teacher_actions_t
+        self.seq_done[:, idx] = done_t
 
         # --- 3. 处理 Done (批量清零) ---
-        """
-        如果环境done, 清空其History Buffer, 防止下一次观测包含上一Episode的信息, 这是正常的
-        但对于done掉的环境, 我不能对它的Sequence Buffer做任何处理
-        """
-        if np.any(done):
-            self.prop_histories[done] = 0
-            self.depth_histories[done] = 0
+        if done_t.any():
+            self.prop_histories[done_t] = 0.0
+            self.depth_histories[done_t] = 0.0
 
         # --- 4. 检查 Batch 是否完成 ---
         self.current_seq_step += 1
@@ -147,11 +154,12 @@ class SequenceAggregator:
         return None
 
     def _pack_batch(self):
+        # 返回 Tensor 副本，防止下一轮循环修改 buffer 影响 dataloader 队列
         return {
-            "proprio": self.seq_prop.copy(),
-            "depth": self.seq_depth.copy(),
-            "actions": self.seq_action.copy(),
-            "dones": self.seq_done.copy()
+            "proprio": self.seq_prop.clone(),
+            "depth": self.seq_depth.clone(),
+            "actions": self.seq_action.clone(),
+            "dones": self.seq_done.clone()
         }
 
 
@@ -198,8 +206,9 @@ class TeacherDatasetStreamer:
                 num_envs=self.num_envs,
                 device=torch.device("cpu"),
                 dt=dt,
-                prob_start_offline=0.05,
-                online_duration_range=(3.0, 30.0),
+                prob_start_offline=0.0,
+                prob_cam_offline=0.3,
+                online_duration_range=(2.0, 20.0),
                 offline_duration_range=(1.0, 10.0)
             )
 
@@ -211,7 +220,7 @@ class TeacherDatasetStreamer:
         with meta_path.open("r", encoding="utf-8") as meta_file:
             return json.load(meta_file)
 
-    def iter_batches(self, max_sequences: Optional[int] = None) -> Iterator[Dict[str, np.ndarray]]:
+    def iter_batches(self, max_sequences: Optional[int] = None) -> Iterator[Dict[str, Tensor]]:
         """
         迭代器：读取 Shard -> Step by Step 推入 Aggregator -> Yield Batch
         """
@@ -687,7 +696,7 @@ def run_training() -> None:
 def train_batch(
     model: MultiModalStudentPolicy,
     optimizer: torch.optim.Optimizer,
-    batch_data: Dict[str, np.ndarray],
+    batch_data: Dict[str, Tensor],
     device: torch.device,
     grad_clip: float,
     mems: Optional[List[Tensor]] = None,
@@ -701,10 +710,10 @@ def train_batch(
         metrics: Dict of loss and other stats.
         new_mems: Memory tensors for the next batch (detached).
     """
-    proprio = torch.from_numpy(batch_data["proprio"]).to(device)
-    depth = torch.from_numpy(batch_data["depth"]).to(device)
-    teacher_actions = torch.from_numpy(batch_data["actions"]).to(device)
-    dones = torch.from_numpy(batch_data["dones"]).to(device)  # [B, S]
+    proprio = batch_data["proprio"].to(device)
+    depth = batch_data["depth"].to(device)
+    teacher_actions = batch_data["actions"].to(device)
+    dones = batch_data["dones"].to(device)  # [B, S]
 
     # Use forward_with_mems for segment recurrence training
     predictions, new_mems = model.forward_with_mems(proprio, depth, mems=mems)
