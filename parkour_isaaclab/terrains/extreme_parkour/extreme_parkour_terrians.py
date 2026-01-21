@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 import random
 import scipy.interpolate as interpolate
+import trimesh
 from typing import TYPE_CHECKING
 from ..utils import parkour_field_to_mesh
 if TYPE_CHECKING:
@@ -95,7 +96,7 @@ def parkour_gap_terrain(
         for i in range(num_goals - 2):
             rand_x = np.random.randint(dis_x_min, dis_x_max)
             dis_x += rand_x
-            rand_y = np.random.randint(dis_y_min, dis_y_max)
+            rand_y = np.random.randint(dis_y_min, dis_y_max) if dis_y_min < dis_y_max else dis_y_min
             if not cfg.apply_flat:
                 height_field_raw[dis_x-gap_size//2 : dis_x+gap_size//2, :] = gap_depth
 
@@ -150,7 +151,7 @@ def parkour_hurdle_terrain(
 
         for i in range(num_goals-2):
             rand_x = np.random.randint(dis_x_min, dis_x_max)
-            rand_y = np.random.randint(dis_y_min, dis_y_max)
+            rand_y = np.random.randint(dis_y_min, dis_y_max) if dis_y_min < dis_y_max else dis_y_min
             dis_x += rand_x
             if not cfg.apply_flat:
                 height_field_raw[dis_x-stone_len//2:dis_x+stone_len//2, ] = np.random.randint(hurdle_height_min, hurdle_height_max)
@@ -203,7 +204,7 @@ def parkour_step_terrain(
         num_stones = num_goals - 2
         for i in range(num_stones):
             rand_x = np.random.randint(dis_x_min, dis_x_max)
-            rand_y = np.random.randint(dis_y_min, dis_y_max)
+            rand_y = np.random.randint(dis_y_min, dis_y_max) if dis_y_min < dis_y_max else dis_y_min
             if i < num_stones // 2:
                 stair_height += step_height
             elif i > num_stones // 2:
@@ -388,3 +389,75 @@ def parkour_demo_terrain(
     return height_field_raw, goals * cfg.horizontal_scale, goal_heights * cfg.vertical_scale
 
 
+@parkour_field_to_mesh
+def parkour_beam_terrain(
+    difficulty: float, 
+    cfg: extreme_parkour_terrains_cfg.ExtremeParkourBeamTerrainCfg,
+    num_goals: int, 
+    )->tuple[np.ndarray, np.ndarray, np.ndarray, list[trimesh.Trimesh]]:
+        
+        width_pixels = int(cfg.size[0] / cfg.horizontal_scale)
+        length_pixels = int(cfg.size[1] / cfg.horizontal_scale)
+        height_field_raw = np.zeros((width_pixels, length_pixels))
+
+        mid_y = length_pixels // 2 
+        dis_x_min = round(cfg.x_range[0] / cfg.horizontal_scale)
+        dis_x_max = round(cfg.x_range[1] / cfg.horizontal_scale) 
+        
+        half_valid_width = round(np.random.uniform(cfg.half_valid_width[0], cfg.half_valid_width[1]) / cfg.horizontal_scale)
+        beam_height_range = eval(cfg.beam_height_range, {"difficulty": difficulty})
+        beam_height_min = beam_height_range[0]
+        beam_height_max = beam_height_range[1]
+
+        platform_len = round(cfg.platform_len / cfg.horizontal_scale)
+        platform_height = round(cfg.platform_height / cfg.vertical_scale)
+        height_field_raw[0:platform_len, :] = platform_height
+        
+        dis_x = platform_len
+        goals = np.zeros((num_goals, 2))
+        goal_heights = np.ones((num_goals)) * platform_height
+        goals[0] = [platform_len - 1, mid_y]
+
+        beam_meshes = []
+        beam_depth = cfg.beam_depth # meter
+        
+        for i in range(num_goals-2):
+            # Calculate distance to next beam
+            rand_x = np.random.randint(dis_x_min, dis_x_max)
+            rand_y = 0 # Keep it centered for teacher training
+            dis_x += rand_x
+            
+            # Create the beam mesh
+            sampled_height = np.random.uniform(beam_height_min, beam_height_max)
+            beam_len = eval(cfg.beam_length, {"difficulty": difficulty})
+            
+            # trimesh box centered at origin
+            # box size: (x_len, y_len, z_len)
+            # We want it to span the valid width
+            box = trimesh.creation.box(extents=[beam_len, half_valid_width * 2 * cfg.horizontal_scale, beam_depth])
+            
+            # Translate to correct position
+            # Note: The parkour_field_to_mesh wrapper handles the centering of the whole terrain 
+            # so we just need to place it relative to the height field index.
+            # Convert index to meters.
+            pos_x = dis_x * cfg.horizontal_scale
+            pos_y = (mid_y + rand_y) * cfg.horizontal_scale
+            pos_z = sampled_height + beam_depth / 2 # beam_height is clearance from ground
+            
+            box.apply_translation([pos_x, pos_y, pos_z])
+            beam_meshes.append(box)
+            
+            # Set goals halfway between beams or at the beam
+            goals[i+1] = [dis_x, mid_y + rand_y]
+            # goal_heights[i+1] = platform_height # Robot stays on ground
+
+        final_dis_x = dis_x + np.random.randint(dis_x_min, dis_x_max)
+        if final_dis_x > width_pixels:
+            final_dis_x = width_pixels - 0.5 // cfg.horizontal_scale
+        goals[-1] = [final_dis_x, mid_y]
+        
+        height_field_raw = padding_height_field_raw(height_field_raw, cfg)
+        if cfg.apply_roughness:
+            height_field_raw = random_uniform_terrain(difficulty, cfg, height_field_raw)
+            
+        return height_field_raw, goals * cfg.horizontal_scale, goal_heights * cfg.vertical_scale, beam_meshes

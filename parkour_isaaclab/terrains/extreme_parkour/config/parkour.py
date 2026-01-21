@@ -4,7 +4,7 @@ from parkour_isaaclab.terrains.extreme_parkour import *
 EXTREME_PARKOUR_TERRAINS_CFG = ParkourTerrainGeneratorCfg(
     size=(16.0, 4.0),
     border_width=20.0,
-    num_rows=10,
+    num_rows=12,
     num_cols=40,
     horizontal_scale=0.08, ## original scale is 0.05, But Computing issue in IsaacLab see this issue in https://github.com/isaac-sim/IsaacLab/issues/2187
     vertical_scale=0.005,
@@ -13,6 +13,14 @@ EXTREME_PARKOUR_TERRAINS_CFG = ParkourTerrainGeneratorCfg(
     use_cache=False,
     curriculum= True,
     sub_terrains={
+        # parkour_beam is easy, it shouldn't be registered at bottom, or check isaaclab terrian difficluty logic then you'll know why!
+        "parkour_beam": ExtremeParkourBeamTerrainCfg(
+                        proportion=0.2,
+                        apply_roughness=True,
+                        x_range = (1.2, 2.2),
+                        half_valid_width = (0.5, 0.8),
+                        beam_height_range = '0.4 - 0.05 * difficulty, 0.5 - 0.1 * difficulty' # Lowered height to force ducking
+                        ),
         "parkour_gap": ExtremeParkourGapTerrainCfg(
                         proportion=0.2,
                         apply_roughness=True,
@@ -42,19 +50,19 @@ EXTREME_PARKOUR_TERRAINS_CFG = ParkourTerrainGeneratorCfg(
                         half_valid_width = (0.5, 1),
                         step_height = '0.1 + 0.35*difficulty'
                         ),
-        "parkour": ExtremeParkourTerrainCfg(
-                        proportion=0.2,
-                        apply_roughness=True,
-                        x_range  = '-0.1, 0.1+0.3*difficulty',
-                        y_range  = '0.2, 0.3+0.1*difficulty',
-                        stone_len  = '0.9 - 0.3*difficulty, 1 - 0.2*difficulty',
-                        incline_height = '0.25*difficulty',
-                        last_incline_height = 'incline_height + 0.1 - 0.1*difficulty'
-                        ),
-        "parkour_demo": ExtremeParkourDemoTerrainCfg(
-                        proportion=0.0,
-                        apply_roughness=True,
-                        ),
+        # "parkour": ExtremeParkourTerrainCfg(
+        #                 proportion=0.0,
+        #                 apply_roughness=True,
+        #                 x_range  = '-0.1, 0.1+0.3*difficulty',
+        #                 y_range  = '0.2, 0.3+0.1*difficulty',
+        #                 stone_len  = '0.9 - 0.3*difficulty, 1 - 0.2*difficulty',
+        #                 incline_height = '0.25*difficulty',
+        #                 last_incline_height = 'incline_height + 0.1 - 0.1*difficulty'
+        #                 ),
+        # "parkour_demo": ExtremeParkourDemoTerrainCfg(
+        #                 proportion=0.0,
+        #                 apply_roughness=True,
+        #                 ),
 
     },
 )

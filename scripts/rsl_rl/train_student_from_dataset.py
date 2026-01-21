@@ -207,7 +207,6 @@ class TeacherDatasetStreamer:
                 device=torch.device("cpu"),
                 dt=dt,
                 prob_start_offline=0.0,
-                prob_cam_offline=0.3,
                 online_duration_range=(2.0, 20.0),
                 offline_duration_range=(1.0, 10.0)
             )
@@ -740,17 +739,27 @@ def train_batch(
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
 
-    # Detach mems to prevent gradient flow across segments (Truncated BPTT)
+    """
+    原代码在 train batch中的mem处理存在缺陷: 如果只检查最后一个done, 如果最后一步环境done了, 清空该环境的mems
+    如果一个 Episode 在序列中间结束，在这个结束点之前的所有 Memory 对于下一个 Batch 来说都是污染数据，必须全部清除，而不仅仅是检查最后一步。
+    """
     if new_mems is not None:
-        # new_mems = [m.detach() for m in new_mems]  # done in _TransformerXLLayer._update_mem()
+        # dones shape: [Batch, Seq_Len]
+        # new_mems shape: List of [Batch, Mem_Len, D_Model]
+        batch_size = dones.shape[0]
 
-        # Reset mems for environments that had done=True at end of sequence
-        # This prevents memory contamination across episodes
-        final_dones = dones[:, -1].bool()  # [B] - check last step of sequence
-        if final_dones.any():
-            for layer_idx in range(len(new_mems)):
-                new_mems[layer_idx] = new_mems[layer_idx].clone()
-                new_mems[layer_idx][final_dones] = 0.0
+        for b in range(batch_size):
+            # 找到该环境在当前序列中所有 done 的位置
+            done_indices = torch.nonzero(dones[b])
+
+            if done_indices.numel() > 0:
+                # 找到最后一个 done 的索引
+                last_done_pos = done_indices.max().item()
+
+                # 清空该位置及之前的记忆
+                # 下一个 Batch 将从 last_done_pos + 1 的上下文开始继续
+                for layer_mem in new_mems:
+                    layer_mem[b, :last_done_pos + 1, :] = 0.0
 
     metrics = {
         "loss": float(loss.item()),

@@ -23,7 +23,7 @@ VIDEO_FLAG=false                                               # --video：是�
 VIDEO_LENGTH=500                                               # --video_length：录制的视频长度
 REALTIME_FLAG=false                                            # --real-time：是否按真实时间节奏采集
 USE_PRETRAINED_FLAG=false                                      # --use_pretrained_checkpoint：是否改用官方预训练模型
-CHECKPOINT_PATH="logs/rsl_rl/unitree_go2_parkour/251114_ckpt/model_49999.pt"  # --checkpoint：本地 checkpoint 路径
+CHECKPOINT_PATH="logs/rsl_rl/unitree_go2_parkour/251230_ckpt/model_49999.pt"  # --checkpoint：本地 checkpoint 路径
 RESUME_DATASET_FLAG=false                                      # --resume_dataset：若目录存在是否继续追加采集
 
 DEBUG_VIS=true                                                 # --debug_vis：开启深度图实时可视化窗口(仅显示前16个环境)

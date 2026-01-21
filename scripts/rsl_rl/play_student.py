@@ -72,6 +72,8 @@ def load_student_policy_for_play(
     payload = torch.load(checkpoint_path, map_location=device)
     meta: Dict[str, object] = dict(payload.get("meta", {}))
 
+    meta = {"num_prop": 53, "action_dim": 12, "camera_resolution": [58, 87]}
+
     proprio_dim = int(meta["num_prop"])
     action_dim = int(meta["action_dim"])
     camera_resolution = tuple(meta.get("camera_resolution", [64, 64]))
@@ -320,7 +322,7 @@ def main() -> None:
             device=device,
             dt=step_dt,
             prob_start_offline=0.0,
-            prob_cam_offline=0.3,
+            prob_cam_offline=1.0,
             online_duration_range=(5.0, 5.0),
             offline_duration_range=(2.0, 2.0)
         )

@@ -29,8 +29,19 @@ class ParkourTerm(CommandTerm):
 
         extras = {}
         for metric_name, metric_value in self.metrics.items():
-            extras[metric_name] = torch.mean(metric_value).item()
-            metric_value[env_ids] = 0.0
+            # Ensure env_ids is on the same device as metric_value (usually CPU for these metrics)
+            if isinstance(env_ids, torch.Tensor):
+                env_ids_on_device = env_ids.to(metric_value.device)
+            else:
+                env_ids_on_device = env_ids
+
+            # Log the mean value of resetting environments (terminal stats)
+            if isinstance(env_ids_on_device, slice) or (isinstance(env_ids_on_device, (list, torch.Tensor)) and len(env_ids_on_device) > 0):
+                extras[metric_name] = torch.mean(metric_value[env_ids_on_device]).item()
+            else:
+                # Fallback if env_ids is empty or something else
+                extras[metric_name] = torch.mean(metric_value).item()
+            metric_value[env_ids_on_device] = 0.0
 
         self._resample(env_ids)
 
@@ -103,4 +114,3 @@ class ParkourManager(CommandManager):
                 raise TypeError(f"Returned object for the term '{term_name}' is not of type ParkourType.")
             # add class to dict
             self._terms[term_name] = term
-
