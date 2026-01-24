@@ -50,6 +50,7 @@ class ProprioEncoder(nn.Module):
 
         self.mlp = nn.Sequential(*layers) if layers else nn.Identity()
         self.token_proj = self._build_linear(prev_dim, token_dim)
+        self.input_norm = nn.LayerNorm(input_dim)
         self._use_residual = bool(layers) and input_dim == prev_dim
 
     def _build_linear(self, in_dim: int, out_dim: int) -> nn.Linear:
@@ -76,6 +77,7 @@ class ProprioEncoder(nn.Module):
                 f"Expected input feature dim {expected_dim}, got {x.size(1)}."
             )
 
+        x = self.input_norm(x)
         residual_source = x
         features = self.mlp(x)
         if self._use_residual:

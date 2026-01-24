@@ -6,12 +6,12 @@ set -euo pipefail
 # ========= 基本配置 =========
 TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Play-v0"
 # 二选一：指定检查点文件或检查点目录
-STUDENT_CKPT="outputs/DAgger_ckpt/26_0109/student_epoch_final.pt"   # 具体检查点文件
+STUDENT_CKPT="outputs/DAgger_ckpt/26_0116/student_epoch_final.pt"   # 具体检查点文件
 # CKPT_DIR="outputs/student_runs/run1"                       # 或指定目录（自动选择最新）
 
 NUM_ENVS=4
-PROP_HIST_LEN=3
-DEPTH_HIST_LEN=4
+PROP_HIST_LEN=1
+DEPTH_HIST_LEN=1
 MEM_LEN=128
 MAX_STEPS=5000
 DEVICE_ARG="cuda:0"

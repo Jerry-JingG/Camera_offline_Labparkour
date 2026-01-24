@@ -480,6 +480,11 @@ def main() -> None:
 
     obs, extras = vec_env.get_observations()
     step = 0
+    
+    # Debug: 记录前 5 步的 actions
+    DEBUG_STEPS = 5
+    debug_actions_buffer = []
+    
     while simulation_app.is_running() and step < args.max_steps:
         depth_image = extras["observations"].get("depth_camera")
         if depth_image is None:
@@ -488,6 +493,27 @@ def main() -> None:
         obs_prop = obs[:, :proprio_dim]
 
         student_action = runner.act(obs_prop, depth_image)
+        
+        # Debug: 输出 env 0 前 5 步的 actions
+        if step < DEBUG_STEPS:
+            env0_action = student_action[0].detach().cpu().numpy()
+            debug_actions_buffer.append(env0_action.copy())
+            print(f"\n{'='*60}")
+            print(f"[DEBUG] Step {step} - Env 0 Action (dim={len(env0_action)}):")
+            print(f"  Action values: {env0_action}")
+            print(f"  Action norm: {np.linalg.norm(env0_action):.6f}")
+            print(f"  Action min: {env0_action.min():.6f}, max: {env0_action.max():.6f}")
+            print(f"{'='*60}")
+        
+        # Debug: 在第 5 步后打印汇总
+        if step == DEBUG_STEPS:
+            print(f"\n{'#'*60}")
+            print(f"[DEBUG SUMMARY] First {DEBUG_STEPS} steps actions for Env 0:")
+            for i, act in enumerate(debug_actions_buffer):
+                print(f"  Step {i}: norm={np.linalg.norm(act):.4f}, "
+                      f"mean={act.mean():.4f}, std={act.std():.4f}")
+            print(f"{'#'*60}\n")
+        
         if step % 50 == 0:
             try:
                 mean_norm = student_action.norm(dim=-1).mean().item()

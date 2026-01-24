@@ -32,7 +32,15 @@ def parkour_field_to_mesh(func: Callable) -> Callable:
 
         cfg.size = tuple(sub_terrain_size)
         # generate the height field
-        z_gen, goals, goal_heights = func(difficulty, cfg, num_goals)
+        results = func(difficulty, cfg, num_goals)
+        if len(results) == 3:
+            z_gen, goals, goal_heights = results
+            extra_meshes = []
+        elif len(results) == 4:
+            z_gen, goals, goal_heights, extra_meshes = results
+        else:
+            raise ValueError("Terrain function must return 3 or 4 values.")
+
         goals -= np.array([0.5 * cfg.size[0], 0.5 * cfg.size[1]])
         heights[border_pixels:-border_pixels, border_pixels:-border_pixels] = z_gen
         # set terrain size back to config
@@ -47,6 +55,10 @@ def parkour_field_to_mesh(func: Callable) -> Callable:
         mesh = trimesh.Trimesh(vertices=vertices, faces=triangles)
         if cfg.use_simplified:
             mesh = mesh.simplify_quadric_decimation(face_count = int(0.65*triangles.shape[0]) , aggression=3)
+        
+        # Combine meshes
+        all_meshes = [mesh] + extra_meshes
+
         # compute origin
         x1 = int((cfg.size[0] * 0.5 - 1) / cfg.horizontal_scale)
         x2 = int((cfg.size[0] * 0.5 + 1) / cfg.horizontal_scale)
@@ -54,7 +66,7 @@ def parkour_field_to_mesh(func: Callable) -> Callable:
         y2 = int((cfg.size[1] * 0.5 + 1) / cfg.horizontal_scale)
         origin_z = np.max(heights[x1:x2, y1:y2]) * cfg.vertical_scale
         origin = np.array([0.5 * cfg.size[0], 0.5 * cfg.size[1], origin_z])
-        return [mesh], origin, goals, goal_heights, x_edge_mask
+        return all_meshes, origin, goals, goal_heights, x_edge_mask
 
     return wrapper
 
