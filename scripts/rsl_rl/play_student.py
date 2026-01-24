@@ -43,6 +43,8 @@ sys.modules[_spec.name] = _module
 _spec.loader.exec_module(_module)
 MultiModalStudentPolicy = _module.MultiModalStudentPolicy
 
+from utils.dropout_manager import CameraDropoutManager
+
 
 def find_latest_student_checkpoint(ckpt_dir: Path) -> Path:
     """Return the checkpoint with the highest epoch index in ckpt_dir."""
@@ -122,6 +124,44 @@ def load_student_policy_for_play(
     model.to(device)
     model.eval()
     return model, meta
+
+
+class DropoutKeyboardHandler:
+    def __init__(self, dropout_manager: CameraDropoutManager, carb_lib, omni_lib):
+        self.dropout_manager = dropout_manager
+        self._carb = carb_lib
+        self._omni = omni_lib
+        self._input = self._carb.input.acquire_input_interface()
+        self._app_window = self._omni.appwindow.get_default_app_window()
+        self._keyboard = self._app_window.get_keyboard()
+        self._keyboard_sub = self._input.subscribe_to_keyboard_events(
+            self._keyboard, self._on_keyboard_event
+        )
+        self.enabled = True
+        self.original_prob = dropout_manager.prob_start_offline
+
+    def _on_keyboard_event(self, event, *args, **kwargs):
+        if event.type == self._carb.input.KeyboardEventType.KEY_PRESS:
+            if event.input == self._carb.input.KeyboardInput.RIGHT_BRACKET: # ']'
+                self.dropout_manager.prob_start_offline = min(1.0, self.dropout_manager.prob_start_offline + 0.05)
+                print(f"[Dropout] Probability increased to: {self.dropout_manager.prob_start_offline:.2f}")
+            elif event.input == self._carb.input.KeyboardInput.LEFT_BRACKET: # '['
+                self.dropout_manager.prob_start_offline = max(0.0, self.dropout_manager.prob_start_offline - 0.05)
+                print(f"[Dropout] Probability decreased to: {self.dropout_manager.prob_start_offline:.2f}")
+            elif event.input == self._carb.input.KeyboardInput.O: # 'O'
+                if self.enabled:
+                    self.original_prob = self.dropout_manager.prob_start_offline
+                    self.dropout_manager.prob_start_offline = 0.0
+                    self.enabled = False
+                    print("[Dropout] Disabled (Probability set to 0.0)")
+                else:
+                    self.dropout_manager.prob_start_offline = self.original_prob
+                    self.enabled = True
+                    print(f"[Dropout] Enabled (Probability restored to: {self.dropout_manager.prob_start_offline:.2f})")
+
+    def __del__(self):
+        if hasattr(self, "_keyboard_sub") and self._keyboard_sub:
+            self._input.unsubscribe_from_keyboard_events(self._keyboard, self._keyboard_sub)
 
 
 class StudentOnlineRunner:
@@ -400,6 +440,12 @@ def parse_args_play() -> argparse.Namespace:
     )
     parser.add_argument("--max_steps", type=int, default=2000, help="Maximum steps to run.")
 
+    # Camera dropout arguments
+    parser.add_argument("--dropout_prob", type=float, default=0.0, help="Initial probability of camera being offline.")
+    parser.add_argument("--online_duration", type=float, nargs=2, default=[2.0, 10.0], help="Range for online duration in seconds (min max).")
+    parser.add_argument("--offline_duration", type=float, nargs=2, default=[1.0, 7.0], help="Range for offline duration in seconds (min max).")
+    parser.add_argument("--show_depth", action="store_true", default=False, help="Show depth camera images in a cv2 window.")
+
     cli_args.add_rsl_rl_args(parser)
     AppLauncher.add_app_launcher_args(parser)
     return parser.parse_args()
@@ -414,6 +460,11 @@ def main() -> None:
 
     app_launcher = AppLauncher(args)
     simulation_app = app_launcher.app
+
+    # Deferred imports (Required after SimulationApp is initialized)
+    import carb
+    import cv2
+    import omni
 
     import parkour_tasks  # noqa: F401  # ensure tasks register after Isaac app is initialized
 
@@ -478,6 +529,17 @@ def main() -> None:
     )
     runner.reset()
 
+    # Initialize Camera Dropout Manager
+    dropout_manager = CameraDropoutManager(
+        num_envs=vec_env.num_envs,
+        device=device,
+        dt=env_cfg.sim.dt * env_cfg.sim.render_interval, # Assuming dt is simulation step
+        prob_start_offline=args.dropout_prob,
+        online_duration_range=tuple(args.online_duration),
+        offline_duration_range=tuple(args.offline_duration)
+    )
+    keyboard_handler = DropoutKeyboardHandler(dropout_manager, carb_lib=carb, omni_lib=omni)
+
     obs, extras = vec_env.get_observations()
     step = 0
     
@@ -491,6 +553,9 @@ def main() -> None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
 
         obs_prop = obs[:, :proprio_dim]
+
+        # Apply Camera Dropout
+        depth_image = dropout_manager.update(depth_image)
 
         student_action = runner.act(obs_prop, depth_image)
         
@@ -524,6 +589,28 @@ def main() -> None:
         done_mask = dones.squeeze(-1).bool()
         if done_mask.any():
             runner.reset_done(done_mask)
+            dropout_manager.reset_env(done_mask)
+
+        # Depth Visualization
+        if args.show_depth:
+            # Construct a grid of depth images
+            # depth_image shape is [num_envs, H, W]
+            # Normalization from [-0.5, 0.5] to [0, 1]
+            depth_vis = (depth_image.detach().cpu().numpy() + 0.5).clip(0, 1)
+            
+            num_envs = depth_vis.shape[0]
+            ncols = int(np.ceil(np.sqrt(num_envs)))
+            nrows = int(np.ceil(num_envs / ncols))
+            
+            H, W = depth_vis.shape[1], depth_vis.shape[2]
+            grid = np.zeros((nrows * H, ncols * W), dtype=np.float32)
+            
+            for i in range(num_envs):
+                r, c = i // ncols, i % ncols
+                grid[r*H:(r+1)*H, c*W:(c+1)*W] = depth_vis[i]
+            
+            cv2.imshow("Depth Camera (Dropouts applied)", grid)
+            cv2.waitKey(1)
 
         obs = obs_next
         step += 1
