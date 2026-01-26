@@ -43,7 +43,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable_depth_debug_vis", action="store_true", help="Disable cv2 depth debug window.")
 
     # Student history config (must match training)
-    parser.add_argument("--prop_hist_len", type=int, default=3)
+    parser.add_argument("--prop_hist_len", type=int, default=1)
     parser.add_argument("--depth_hist_len", type=int, default=4)
     parser.add_argument("--sequence_length", type=int, default=64, help="TXL mem_len used for inference.")
 

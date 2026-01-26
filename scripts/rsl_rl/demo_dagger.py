@@ -32,7 +32,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task", type=str, required=True, help="Isaac task name (e.g., TeacherCam/Student Play).")
     parser.add_argument("--num_envs", type=int, default=1, help="Number of parallel envs to simulate.")
     parser.add_argument("--student_checkpoint", type=str, required=True, help="Path to student_epoch_*.pt checkpoint.")
-    parser.add_argument("--prop_hist_len", type=int, default=3, help="History length for proprio tokens.")
+    parser.add_argument("--prop_hist_len", type=int, default=1, help="History length for proprio tokens.")
     parser.add_argument("--depth_hist_len", type=int, default=4, help="History length for depth tokens.")
     parser.add_argument("--sequence_length", type=int, default=64, help="Transformer-XL mem length during play.")
     parser.add_argument("--max_steps", type=int, default=2000, help="Max simulation steps; 0 for no limit.")

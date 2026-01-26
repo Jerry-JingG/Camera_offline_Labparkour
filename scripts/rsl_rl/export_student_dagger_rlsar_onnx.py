@@ -117,7 +117,7 @@ def _build_student_from_checkpoint(
     num_prop = int(meta["num_prop"])
     action_dim = int(meta["action_dim"])
     camera_resolution = tuple(meta.get("camera_resolution", [58, 87]))
-    prop_hist_len = int(meta.get("prop_hist_len", 3))
+    prop_hist_len = int(meta.get("prop_hist_len", 1))
     depth_hist_len = int(meta.get("depth_hist_len", 4))
     mem_len = int(meta.get("sequence_length", 64))
 
@@ -173,7 +173,7 @@ def main() -> None:
     num_prop = int(meta["num_prop"])
     action_dim = int(meta["action_dim"])
     camera_resolution = tuple(meta.get("camera_resolution", [58, 87]))
-    prop_hist_len = int(meta.get("prop_hist_len", 3))
+    prop_hist_len = int(meta.get("prop_hist_len", 1))
     depth_hist_len = int(meta.get("depth_hist_len", 4))
     mem_len = int(meta.get("sequence_length", 64))
     token_dim = 128

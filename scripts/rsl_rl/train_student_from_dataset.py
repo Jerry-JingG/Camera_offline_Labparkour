@@ -424,7 +424,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_epochs", type=int, default=100, help="Number of passes over the dataset.")
     # parser.add_argument("--batch_size", type=int, default=8)  batch_size需要等于num_envs!!!
     parser.add_argument("--sequence_length", type=int, default=64, help="sequence_length = mem_len 是一般transformerxl网络的默认实现")
-    parser.add_argument("--prop_hist_len", type=int, default=3, help="History length (in steps) for proprio tokens.")
+    parser.add_argument("--prop_hist_len", type=int, default=1, help="History length (in steps) for proprio tokens.")
     parser.add_argument("--depth_hist_len", type=int, default=4, help="Number of stacked depth frames per sample.")
     parser.add_argument("--learning_rate", type=float, default=3e-4, help="Optimizer learning rate.")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for AdamW optimizer.")

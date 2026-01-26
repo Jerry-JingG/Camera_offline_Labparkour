@@ -43,6 +43,7 @@ if PARKOUR_TASKS_ROOT not in sys.path:
 
 # === Import aggregator and student policy (same directory) ===
 from train_student_from_dataset import SequenceAggregator, MultiModalStudentPolicy, TransformerXLTemporal
+from utils.dropout_manager import CameraDropoutManager
 
 
 # ====== Isaac Lab / task loading (same as collect.py) ======
@@ -119,7 +120,7 @@ def parse_args():
     p.add_argument("--num_iters", type=int, default=2000)
 
     p.add_argument("--sequence_length", type=int, default=64)
-    p.add_argument("--prop_hist_len", type=int, default=3)
+    p.add_argument("--prop_hist_len", type=int, default=1)
     p.add_argument("--depth_hist_len", type=int, default=4)
     p.add_argument(
         "--num_pretrain_iters",
@@ -156,6 +157,14 @@ def parse_args():
     p.add_argument("--grad_clip", type=float, default=1.0)
 
     p.add_argument("--save_dir", type=str, default="student_dagger_outputs")
+
+    # Camera dropout for student (simulates camera blackout)
+    p.add_argument(
+        "--camera_dropout_prob",
+        type=float,
+        default=0.0,
+        help="Probability of camera being offline for student (0.0=disabled). Teacher always sees clean depth.",
+    )
 
     # 追加 RSL-RL 相关参数（resume / logger 等），保持与 train.py 一致的 CLI 行为
     try:
@@ -263,6 +272,17 @@ def main():
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    # Camera dropout manager: applies dropout to student's depth only
+    dropout_manager = None
+    if args.camera_dropout_prob > 0:
+        dropout_manager = CameraDropoutManager(
+            num_envs=args.num_envs,
+            device=device,
+            dt=vec_env.unwrapped.step_dt,
+            prob_start_offline=args.camera_dropout_prob,
+        )
+        print(f"[INFO] Camera dropout enabled with prob={args.camera_dropout_prob}")
+
     global_step = 0
     # Episode stats buffers for online logging
     ep_returns = np.zeros(args.num_envs, dtype=np.float64)
@@ -325,11 +345,16 @@ def main():
             # Apply masking to the student's current observation input
             curr_prop_hist[:, -1, :] = obs_prop_np_masked
             
-            # Depth
+            # Depth: apply dropout for student only
             curr_depth_hist = aggregator.depth_history.copy()
             curr_depth_hist = np.roll(curr_depth_hist, -1, axis=1)
-            # Depth: use original shape (58x87) without cropping, matching train.py distillation
-            curr_depth_hist[:, -1, :, :] = depth_np
+            # Apply camera dropout to student's current depth frame
+            depth_for_student = depth_np.copy()
+            if dropout_manager is not None:
+                depth_t_tmp = torch.from_numpy(depth_for_student).float().to(device)
+                depth_t_tmp = dropout_manager.update(depth_t_tmp)
+                depth_for_student = depth_t_tmp.cpu().numpy()
+            curr_depth_hist[:, -1, :, :] = depth_for_student
 
             # Flatten Proprio: [N, H, D] -> [N, H*D]
             prop_flat = curr_prop_hist.reshape(args.num_envs, -1)
@@ -396,8 +421,10 @@ def main():
                 ep_returns[done_indices] = 0.0
                 ep_lengths[done_indices] = 0
                 episodes_this_iter += len(done_indices)
-                
-                # last_yaw_pred reset removed
+
+                # Reset dropout state for done environments
+                if dropout_manager is not None:
+                    dropout_manager.reset_env(torch.from_numpy(dones_np).to(device))
 
             # 更新 TXL 记忆：对已经 done 的环境清零对应的 memory
             if new_mems is not None:
@@ -517,6 +544,10 @@ def main():
                 # base_parkour.terrain is the ParkourTerrainImporter which holds terrain_levels
                 avg_level = float(base_parkour.terrain.terrain_levels.float().mean().item())
                 wandb_metrics["rollout/terrain_level_mean"] = avg_level
+
+            # Camera dropout stats
+            if dropout_manager is not None:
+                wandb_metrics["camera/offline_ratio"] = dropout_manager.offline_state.float().mean().item()
 
             wandb.log(wandb_metrics, step=global_step)
 

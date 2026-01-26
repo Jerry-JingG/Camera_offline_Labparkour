@@ -39,6 +39,7 @@ class DepthEncoder(nn.Module):
         self.pool: Optional[nn.Module] = (
             None if grid_size == 4 else nn.AdaptiveAvgPool2d((grid_size, grid_size))
         )
+
         self.drop = nn.Dropout(dropout)
         self.pos_embed: Optional[nn.Parameter]
         if add_2d_pos_embed:

@@ -16,8 +16,8 @@ NUM_ITERS=50000                                             # --num_iters：DAGG
 NUM_PRETRAIN_ITERS=1000                                     # --num_pretrain_iters：预热迭代，前若干迭代由 Teacher 全程驾驶
 
 SEQUENCE_LENGTH=64                                          # --sequence_length：TXL 序列长度 / mem_len
-PROP_HIST_LEN=3                                             # --prop_hist_len：ProprioEncoder 的历史步数
-DEPTH_HIST_LEN=4                                            # --depth_hist_len：DepthEncoder 的帧堆叠数
+PROP_HIST_LEN=1                                             # --prop_hist_len：ProprioEncoder 的历史步数
+DEPTH_HIST_LEN=1                                            # --depth_hist_len：DepthEncoder 的帧堆叠数
 
 TEACHER_CHECKPOINT="/home/jing/IsaacLab/Camera_offline_Labparkour/logs/rsl_rl/unitree_go2_parkour/2025-12-30_22-14-25_12-30-teacher-1/model_49999.pt"  # 预训练 Teacher PPO 权重路径
 STUDENT_CHECKPOINT=""                                           # 可选：已有学生模型 checkpoint，用于继续 DAGGER 训练
@@ -34,13 +34,18 @@ MIX_BETA_START=0.8
 MIX_BETA_END=0.1
 MIX_DECAY_ITERS=5000
 
+# -------------------------- 相机掉线模拟参数 -----------------------------------
+# 仅对学生施加随机相机掉线（全黑屏），教师始终看到干净深度。
+# 设为 0.0 关闭掉线模拟；设为 >0 的概率值开启（如 0.3 表示 30%）。
+CAMERA_DROPOUT_PROB=0.5
+
 # 教师是否使用历史编码（hist_encoding）。开启后 teacher 标签使用 TXL 历史，贴近 train.py/distill 行为。
 TEACHER_HIST_ENCODING=true                                      # --teacher_hist_encoding
 
 # ------------------------------- 日志 / W&B 参数 -------------------------------
 LOGGER="wandb"                                                  # --logger：设置为 wandb 开启 W&B 记录，留空则关闭
 LOG_PROJECT_NAME="parkour-dagger"                              # --log_project_name：W&B Project 名（需先在网页创建）
-RUN_NAME="student-dagger-1-2"                                      # --run_name：W&B run 名称前缀，可自定义/留空
+RUN_NAME="student-dagger-dropout-1-16"                                      # --run_name：W&B run 名称前缀，可自定义/留空
 # 如需离线记录，可在运行前手动 export WANDB_MODE=offline；如需指定实体，可 export WANDB_ENTITY=your_team
 # 如果只在本机使用且希望写死 Key，可在此填写；为空则使用环境变量或跳过。
 WANDB_API_KEY="85897bb211dff1da90eca7244d836724804604d2"                             # 示例：WANDB_API_KEY="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -162,6 +167,11 @@ if [[ -n "${LOG_PROJECT_NAME}" ]]; then
 fi
 if [[ -n "${RUN_NAME}" ]]; then
     DAGGER_CMD+=("--run_name" "${RUN_NAME}")
+fi
+
+# 相机掉线模拟（仅对学生生效）
+if [[ -n "${CAMERA_DROPOUT_PROB}" ]] && (( $(echo "${CAMERA_DROPOUT_PROB} > 0" | bc -l) )); then
+    DAGGER_CMD+=("--camera_dropout_prob" "${CAMERA_DROPOUT_PROB}")
 fi
 
 # 可选：如果设置了 WANDB_API_KEY 且不在 offline 模式，则尝试自动登录
