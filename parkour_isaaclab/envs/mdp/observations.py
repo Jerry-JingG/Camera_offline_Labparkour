@@ -36,9 +36,7 @@ class ExtremeParkourObservations(ManagerTermBase):
         self.sensor_cfg = cfg.params["sensor_cfg"]
         self.asset_cfg = cfg.params["asset_cfg"]
         self.history_length = cfg.params['history_length']
-        self._obs_history_buffer = torch.zeros(self.num_envs, self.history_length, 3 + 2 + 3 + 4 + 36 + 5, device=self.device)
-        self.delta_yaw = torch.zeros(self.num_envs, device=self.device)
-        self.delta_next_yaw = torch.zeros(self.num_envs, device=self.device)
+        self._obs_history_buffer = torch.zeros(self.num_envs, self.history_length, 3 + 2 + 4 + 36 + 5, device=self.device)
         self.measured_heights = torch.zeros(self.num_envs, 132, device=self.device)
         self.env = env
         self.body_id = self.asset.find_bodies('base')[0]
@@ -61,24 +59,19 @@ class ExtremeParkourObservations(ManagerTermBase):
         roll, pitch, yaw = euler_xyz_from_quat(self.asset.data.root_quat_w)
         imu_obs = torch.stack((wrap_to_pi(roll), wrap_to_pi(pitch)), dim=1).to(self.device)
         if env.common_step_counter % 5 == 0:
-            self.delta_yaw = self.parkour_event.target_yaw - wrap_to_pi(yaw)
-            self.delta_next_yaw = self.parkour_event.next_target_yaw - wrap_to_pi(yaw)
             self.measured_heights = self._get_heights()
         commands = env.command_manager.get_command('base_velocity')
         obs_buf = torch.cat((
                             self.asset.data.root_ang_vel_b * 0.25,   #[1,3] 0~2
                             imu_obs,    #[1,2] 3~4
-                            0*self.delta_yaw[:, None],   #[1,1] 5
-                            self.delta_yaw[:, None], #[1,1] 6
-                            self.delta_next_yaw[:, None], #[1,1] 7 
-                            0*commands[:, 0:2], #[1,2] 8 
-                            commands[:, 0:1],  #[1,1] 9
-                            env_idx_tensor,
-                            invert_env_idx_tensor,
-                            self.asset.data.joint_pos - self.asset.data.default_joint_pos,
-                            self.asset.data.joint_vel * 0.05 ,
-                            env.action_manager.get_term('joint_pos').action_history_buf[:, -1],
-                            self._get_contact_fill(),
+                            0*commands[:, 0:2], #[1,2] 5~6
+                            commands[:, 0:1],  #[1,1] 7
+                            env_idx_tensor,    #[1,1] 8
+                            invert_env_idx_tensor,  #[1,1] 9
+                            self.asset.data.joint_pos - self.asset.data.default_joint_pos,  #[1,12] 10~21
+                            self.asset.data.joint_vel * 0.05 ,  #[1,12] 22~33
+                            env.action_manager.get_term('joint_pos').action_history_buf[:, -1],  #[1,12] 34~45
+                            self._get_contact_fill(),  #[1,5] 46~50
                             ),dim=-1)
         priv_explicit = self._get_priv_explicit()
         priv_latent = self._get_priv_latent()
@@ -88,7 +81,6 @@ class ExtremeParkourObservations(ManagerTermBase):
                                   priv_latent, # 29
                                   self._obs_history_buffer.view(self.num_envs, -1)
                                   ],dim=-1)
-        obs_buf[:, 6:8] = 0
         self._obs_history_buffer = torch.where(
             (env.episode_length_buf <= 1)[:, None, None], 
             torch.stack([obs_buf] * self.history_length, dim=1),
@@ -204,26 +196,6 @@ class image_features(ManagerTermBase):
         return depth_image
 
     def _normalize_depth_image(self, depth_image):
-        depth_image = depth_image  # make similiar to scandot 
+        depth_image = depth_image  # make similiar to scandot
         depth_image = (depth_image) / (self.clipping_range)  - 0.5
         return depth_image
-    
-class obervation_delta_yaw_ok(ManagerTermBase):
-
-    def __init__(self, cfg: ObservationTermCfg, env: ParkourManagerBasedRLEnv):
-        super().__init__(cfg, env)
-        self.delta_yaw = torch.zeros(self.num_envs, device=self.device)
-
-    def __call__(
-        self,
-        env: ParkourManagerBasedRLEnv,    
-        parkour_name: str,
-        threshold: float,
-        asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    ):
-        if env.common_step_counter % 5 == 0:
-            parkour_event: ParkourEvent =  env.parkour_manager.get_term(parkour_name)
-            asset: Articulation = env.scene[asset_cfg.name]
-            _, _, yaw = euler_xyz_from_quat(asset.data.root_quat_w)
-            self.delta_yaw = parkour_event.target_yaw - wrap_to_pi(yaw)
-        return self.delta_yaw < threshold
