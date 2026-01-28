@@ -89,18 +89,8 @@ class StudentObservationsCfg:
             },
         )
 
-    @configclass
-    class DeltaYawOkPolicyCfg(ObsGroup):
-        deta_yaw_ok =  ObsTerm(
-            func=observations.obervation_delta_yaw_ok,
-            params={            
-            "parkour_name":'base_parkour',
-            'threshold': 0.6
-            },
-        )
     policy: PolicyCfg = PolicyCfg()
     depth_camera: DepthCameraPolicyCfg = DepthCameraPolicyCfg()
-    delta_yaw_ok: DeltaYawOkPolicyCfg = DeltaYawOkPolicyCfg()
 
 
 @configclass
