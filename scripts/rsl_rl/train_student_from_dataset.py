@@ -270,7 +270,6 @@ class MultiModalStudentPolicy(nn.Module):
             grid_size=fusion_cfg.get("grid_size", 4),
             dropout=fusion_cfg.get("depth_dropout", 0.1),
         )
-        # self.yaw_head = nn.Linear(token_dim, 2)  # Removed as requested
         self.fusion_transformer = MultiModalFusionTransformer(
             token_dim=token_dim,
             num_layers=fusion_cfg.get("num_layers", 2),
@@ -327,7 +326,6 @@ class MultiModalStudentPolicy(nn.Module):
             return_mems=False,
         )
         actions = self.action_head.forward_sequence(temporal_out)["mean"]
-        # yaw_pred = self.yaw_head(temporal_out) # Removed
         return actions, None
 
     def forward_with_mems(
@@ -369,10 +367,9 @@ class MultiModalStudentPolicy(nn.Module):
             causal_mask=True,
             return_mems=True,    # Return new mems for next segment
         )
-        
+
         # 4. Action head
         actions = self.action_head.forward_sequence(temporal_out)["mean"]
-        # yaw_pred = self.yaw_head(temporal_out) # Removed
         return actions, None, new_mems
 
     def forward_step(
@@ -390,7 +387,6 @@ class MultiModalStudentPolicy(nn.Module):
 
         Returns:
             actions_step: Tensor[B, action_dim]，当前步动作均值。
-            yaw_pred_step: Tensor[B, 2]，辅助任务预测的偏航角变化。
             new_mems: 更新后的记忆状态列表。
         """
         if proprio_step.dim() != 2:

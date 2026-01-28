@@ -303,9 +303,6 @@ def main():
     except Exception:
         base_parkour = None
         num_goals = None
-    
-    # Butter for Closed-Loop Yaw Injection - Removed as requested
-    # last_yaw_pred = np.zeros((args.num_envs, 2), dtype=np.float32)
 
     # ===== main training loop =====
     train_start_t = time.time()
@@ -330,7 +327,6 @@ def main():
             teacher_actions_cpu = teacher_actions.cpu()
             teacher_actions_np = teacher_actions_cpu.numpy()
 
-            # --- Mask Proprioception & Closed-Loop Injection (Removed as requested) ---
             obs_prop_np_masked = obs_prop_np.copy()
             
             # --- student acting ---
@@ -365,7 +361,6 @@ def main():
             # TXL 单步推理：使用记忆状态 txl_mems
             student.eval()
             with torch.no_grad():
-                # Student prediction (yaw_pred_step removed)
                 actions_step, _, new_mems = student.forward_step(prop_step, depth_step, mems=txl_mems)
                 student_act = actions_step.cpu()
 
