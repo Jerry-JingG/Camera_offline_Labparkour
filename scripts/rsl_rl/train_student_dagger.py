@@ -327,8 +327,15 @@ def main():
             teacher_actions_cpu = teacher_actions.cpu()
             teacher_actions_np = teacher_actions_cpu.numpy()
 
+            # --- Mask privileged information for student ---
+            # Teacher policy can see delta_yaw (indices 6-7) in obs_buf
+            # Student policy should not have access to this privileged direction info
+            # Indices:
+            #   6: delta_yaw (current target direction - robot yaw)
+            #   7: delta_next_yaw (next target direction - robot yaw)
             obs_prop_np_masked = obs_prop_np.copy()
-            
+            obs_prop_np_masked[:, 6:8] = 0  # Zero out delta_yaw and delta_next_yaw
+
             # --- student acting ---
             # build student input from its own histories (aggregator stores them)
             # aggregator.prop_history: [N, H, D], contains steps [t-H, ..., t-1]
