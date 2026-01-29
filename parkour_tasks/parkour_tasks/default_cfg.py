@@ -89,13 +89,13 @@ CAMERA_CFG = RayCasterCameraCfg(
     prim_path= '{ENV_REGEX_NS}/Robot/base',
     data_types=["distance_to_camera"],
     offset=RayCasterCameraCfg.OffsetCfg(
-        pos=(0.33, 0.0, 0.08), 
+        pos=(0.33, 0.0, 0.04), 
         rot=quat_from_euler_xyz_tuple(*tuple(torch.deg2rad(torch.tensor([180,70,-90])))), 
         convention="ros"
         ),
     depth_clipping_behavior = 'max',
     pattern_cfg = PinholeCameraPatternCfg(
-        focal_length=11.041, 
+        focal_length=6.041, 
         horizontal_aperture=20.955,
         vertical_aperture = 12.240,
         height=60,
@@ -109,12 +109,13 @@ CAMERA_USD_CFG = AssetBaseCfg(
     prim_path="{ENV_REGEX_NS}/Robot/base/d435",
     spawn=sim_utils.UsdFileCfg(usd_path=os.path.join(agents.__path__[0],'d435.usd')),
     init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(0.33, 0.0, 0.08), 
+            pos=(0.33, 0.0, 0.04), 
             rot=quat_from_euler_xyz_tuple(*tuple(torch.deg2rad(torch.tensor([180,90,-90]))))
     )
 )
 VIEWER = ViewerCfg(
     eye=(-0., 2.6, 1.6),
     asset_name = "robot",
-    origin_type = 'asset_root',
+    origin_type = 'world'
+    # origin_type = 'asset_root',
 )

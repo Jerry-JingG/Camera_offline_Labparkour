@@ -8,6 +8,7 @@ from parkour_isaaclab.terrains.extreme_parkour.config.parkour import EXTREME_PAR
 from parkour_isaaclab.envs import ParkourManagerBasedRLEnvCfg
 from .parkour_mdp_cfg import * 
 from parkour_tasks.default_cfg import ParkourDefaultSceneCfg, VIEWER
+from .utils import utils, utils_cfg
 
 @configclass
 class ParkourTeacherSceneCfg(ParkourDefaultSceneCfg):
@@ -18,6 +19,15 @@ class ParkourTeacherSceneCfg(ParkourDefaultSceneCfg):
         pattern_cfg=patterns.GridPatternCfg(resolution=0.15, size=[1.65, 1.5]),
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
+    )
+    forward_scanner = utils_cfg.RayCasterVerticalCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/base",
+        offset=utils_cfg.RayCasterCfg.OffsetCfg(pos=(0.33, 0.0, 0.0)),
+        ray_alignment="base",
+        pattern_cfg=utils_cfg.GridPatternVerticalCfg(resolution=0.1, size=[0, 0.5], direction=(1.0, 0.0, 0.0)),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
+        max_distance=2.0,
     )
     contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", 
                                       history_length=2, 

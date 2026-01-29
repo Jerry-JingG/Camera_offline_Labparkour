@@ -31,6 +31,7 @@ class ExtremeParkourObservations(ManagerTermBase):
         super().__init__(cfg, env)
         self.contact_sensor: ContactSensor = env.scene.sensors['contact_forces']
         self.ray_sensor: RayCaster = env.scene.sensors['height_scanner']
+        self.forward_sensor: RayCaster = env.scene.sensors['forward_scanner'] 
         self.parkour_event: ParkourEvent =  env.parkour_manager.get_term(cfg.params["parkour_name"])
         self.asset: Articulation = env.scene[cfg.params["asset_cfg"].name]
         self.sensor_cfg = cfg.params["sensor_cfg"]
@@ -113,9 +114,20 @@ class ExtremeParkourObservations(ManagerTermBase):
         self,
         ):
         base_lin_vel = self.asset.data.root_lin_vel_b 
-        return torch.cat((base_lin_vel * 2.0,
-                        0 * base_lin_vel,
-                        0 * base_lin_vel), dim=-1).to(self.device)
+
+        starts = self.forward_sensor.data.ray_starts_w
+        hits = self.forward_sensor.data.ray_hits_w
+        forward_distances = torch.norm(hits - starts, dim=-1)
+        forward_distances = torch.clamp(forward_distances, max=2.0) - 1.0
+
+        return torch.cat((
+            base_lin_vel * 2.0,
+            forward_distances
+        ), dim=-1).to(self.device)
+
+        # return torch.cat((base_lin_vel * 2.0,
+        #                 0 * base_lin_vel,
+        #                 0 * base_lin_vel), dim=-1).to(self.device)
     
     def _get_priv_latent(
         self,

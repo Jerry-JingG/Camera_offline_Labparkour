@@ -403,6 +403,8 @@ def parkour_beam_terrain(
         mid_y = length_pixels // 2 
         dis_x_min = round(cfg.x_range[0] / cfg.horizontal_scale)
         dis_x_max = round(cfg.x_range[1] / cfg.horizontal_scale) 
+        dis_y_min = round(cfg.y_range[0] / cfg.horizontal_scale)
+        dis_y_max = round(cfg.y_range[1] / cfg.horizontal_scale)
         
         half_valid_width = round(np.random.uniform(cfg.half_valid_width[0], cfg.half_valid_width[1]) / cfg.horizontal_scale)
         beam_height_range = eval(cfg.beam_height_range, {"difficulty": difficulty})
@@ -424,7 +426,7 @@ def parkour_beam_terrain(
         for i in range(num_goals-2):
             # Calculate distance to next beam
             rand_x = np.random.randint(dis_x_min, dis_x_max)
-            rand_y = 0 # Keep it centered for teacher training
+            rand_y = np.random.randint(dis_y_min, dis_y_max) if dis_y_min < dis_y_max else dis_y_min
             dis_x += rand_x
             
             # Create the beam mesh
@@ -435,6 +437,16 @@ def parkour_beam_terrain(
             # box size: (x_len, y_len, z_len)
             # We want it to span the valid width
             box = trimesh.creation.box(extents=[beam_len, half_valid_width * 2 * cfg.horizontal_scale, beam_depth])
+            
+            # 2. 如果启用了 roughness，对 Mesh 进行处理
+            if cfg.apply_roughness:
+
+                box = box.subdivide(iterations=1, face_index=None)
+                noise_scale = 0.01 + 0.01 * difficulty  # 随难度增加
+
+                # 对所有顶点施加随机噪声
+                noise = np.random.uniform(-noise_scale, noise_scale, box.vertices.shape)
+                box.vertices += noise
             
             # Translate to correct position
             # Note: The parkour_field_to_mesh wrapper handles the centering of the whole terrain 
