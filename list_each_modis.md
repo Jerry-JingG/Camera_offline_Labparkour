@@ -56,9 +56,4 @@ merge yky的 wandb&train_dataset(txl_memory)到我的工作区。txl.py改了一
 dropout_manager添加了相机和感知的混合掉线。效果一般
 
 commit13:
-merge了dagger训练逻辑。额外修改了：
-1. train batch时的mem处理，已修改为: 该sequence中只要有done的步骤, 那么在最后一个done的步骤之前的所有mem被清空
-2. parkour_isaaclab/terrains/extreme_parkour/config/parkour.py 中，将beam terrian提到最上面.
-   isaaclab的地形curriculum逻辑是最左侧生成最简单的地形，最右侧生成最难的地形。机器狗在当前赛道的完成度决定了它重生后处在哪一难度的赛道
-   最简单的地形放到最下面会造成训练不稳定
-3. 修改了parkour_teacher_cfg，训练时地形的粗糙程度应该是有随机化的
+merge了dagger训练逻辑。额外修改了train batch时的mem处理，已修改为: 该sequence中只要有done的步骤, 那么在最后一个done的步骤之前的所有mem被清空

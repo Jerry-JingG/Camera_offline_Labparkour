@@ -9,7 +9,7 @@ set -euo pipefail
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ------------------------------- 核心训练参数 ---------------------------------
-TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Play-v0"  # --task
+TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-v0"  # --task
 NUM_ENVS=64                                                 # --num_envs：并行环境数量
 NUM_ITERS=50000                                              # --num_iters：DAGGER 总迭代次数
 NUM_PRETRAIN_ITERS=1000                                      # --num_pretrain_iters：预热迭代，前若干迭代由 Teacher 全程驾驶

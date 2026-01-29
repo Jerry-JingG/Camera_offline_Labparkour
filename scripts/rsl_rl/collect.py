@@ -451,8 +451,8 @@ def main():  # noqa: C901
                 cv2.imshow("Collect Debug (Depth)", grid_img)
                 cv2.waitKey(1)
 
-            obs_prop = obs[:, :num_prop]
-            obs_est = obs.clone()
+            obs_prop = obs[:, :num_prop].clone()
+            obs_est = obs
             priv_est = estimator(obs_est[:, :num_prop])
             obs_est[:, priv_start:priv_end] = priv_est
 

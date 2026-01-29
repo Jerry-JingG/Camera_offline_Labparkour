@@ -526,7 +526,13 @@ def main():
                 "model_state_dict": student_model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "iter": it + 1,
-                "meta": {"is_dagger": True, "task": args.task, "num_prop": 53, "action_dim": 12, "camera_resolution": [58, 87]}
+                "meta": {
+                    "is_dagger": True,
+                    "task": args.task,
+                    "num_prop": proprio_dim,
+                    "action_dim": action_dim,
+                    "camera_resolution": camera_resolution
+                }
             }, ckpt_path)
             print(f"Saved checkpoint to {ckpt_path}")
 
