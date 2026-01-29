@@ -331,6 +331,10 @@ def main() -> None:
         depth = _extract_depth(extras["observations"]).to(student_device)
         obs_prop = obs[:, :num_prop]
 
+        # Mask privileged information (delta_yaw at indices 6-7)
+        # Student policy should not have access to privileged direction info during inference
+        obs_prop[:, 6:8] = 0  # Zero out delta_yaw and delta_next_yaw
+
         actions = runner.act(obs_prop, depth)
         obs_next, rewards, dones, infos = vec_env.step(actions.to(vec_env.device))
 
