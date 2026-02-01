@@ -254,6 +254,7 @@ class MultiModalStudentPolicy(nn.Module):
         self.prop_hist_len = prop_hist_len
         self.depth_hist_len = depth_hist_len
         self.token_dim = token_dim
+        self.num_prop = proprio_dim  # Number of proprio features per frame
         height, width = camera_resolution
 
         self.proprio_encoder = ProprioEncoder(
@@ -269,6 +270,7 @@ class MultiModalStudentPolicy(nn.Module):
             token_dim=token_dim,
             grid_size=fusion_cfg.get("grid_size", 4),
             dropout=fusion_cfg.get("depth_dropout", 0.1),
+            num_prop=proprio_dim,  # Pass num_prop for yaw prediction head
         )
         self.fusion_transformer = MultiModalFusionTransformer(
             token_dim=token_dim,
@@ -300,6 +302,19 @@ class MultiModalStudentPolicy(nn.Module):
             action_scale=action_head_cfg.get("action_scale", 1.0),
         )
 
+    def _get_last_frame_indices(self, prop_hist_len: int, num_prop: int) -> Tuple[int, int]:
+        """Get the indices for delta_yaw in the last frame of proprio history.
+
+        Args:
+            prop_hist_len: Number of frames in proprio history
+            num_prop: Number of proprio features per frame
+
+        Returns:
+            start_idx, end_idx for delta_yaw in flattened proprio
+        """
+        last_frame_start = (prop_hist_len - 1) * num_prop
+        return last_frame_start + 6, last_frame_start + 8
+
     def forward(self, proprio_seq: Tensor, depth_seq: Tensor) -> Tensor:
         """
         Args:
@@ -311,12 +326,33 @@ class MultiModalStudentPolicy(nn.Module):
         """
 
         batch_size, seq_len, feat_dim = proprio_seq.shape
-        prop_encoded = self.proprio_encoder(
-            proprio_seq.reshape(batch_size * seq_len, feat_dim)
-        )  # [B*S, 1, C]
-        depth_encoded = self.depth_encoder(
-            depth_seq.reshape(batch_size * seq_len, depth_seq.size(2), depth_seq.size(3), depth_seq.size(4))
-        )  # [B*S, T, C]
+        proprio_flat = proprio_seq.reshape(batch_size * seq_len, feat_dim)
+
+        # Prepare proprio for depth encoder (zero out delta_yaw)
+        proprio_for_encoder = proprio_flat[:, :self.num_prop].clone()
+        proprio_for_encoder[:, 6:8] = 0
+
+        # Encode depth and extract yaw predictions
+        depth_output = self.depth_encoder(
+            depth_seq.reshape(batch_size * seq_len, depth_seq.size(2), depth_seq.size(3), depth_seq.size(4)),
+            proprio_for_encoder
+        )  # [B*S, num_tokens * token_dim + 2]
+
+        # Split into depth tokens and yaw
+        depth_tokens_flat = depth_output[:, :-2]
+        yaw_pred = depth_output[:, -2:]
+        yaw_scaled = 1.5 * yaw_pred
+
+        # Reshape depth tokens
+        num_tokens = self.depth_encoder.grid_size * self.depth_encoder.grid_size
+        depth_encoded = depth_tokens_flat.reshape(batch_size * seq_len, num_tokens, self.token_dim)
+
+        # Replace delta_yaw in proprio
+        proprio_modified = proprio_flat.clone()
+        start_idx, end_idx = self._get_last_frame_indices(self.prop_hist_len, self.num_prop)
+        proprio_modified[:, start_idx:end_idx] = yaw_scaled
+
+        prop_encoded = self.proprio_encoder(proprio_modified)  # [B*S, 1, C]
         fused = self.fusion_transformer(prop_encoded, depth_encoded)
         fused_seq = fused["all_pooled"].reshape(batch_size, seq_len, -1)
         temporal_out, _ = self.temporal_model(
@@ -326,87 +362,136 @@ class MultiModalStudentPolicy(nn.Module):
             return_mems=False,
         )
         actions = self.action_head.forward_sequence(temporal_out)["mean"]
-        return actions, None
+        yaw_pred_seq = yaw_pred.reshape(batch_size, seq_len, 2)
+        return actions, yaw_pred_seq
 
     def forward_with_mems(
         self,
         proprio_seq: Tensor,
         depth_seq: Tensor,
         mems: Optional[List[Tensor]] = None,
-    ) -> Tuple[Tensor, List[Tensor]]:
-        """
-        Forward pass with segment recurrence memory support.
-        
+        delta_yaw_ok: Optional[Tensor] = None,
+    ) -> Tuple[Tensor, Tensor, List[Tensor]]:
+        """Forward pass with yaw prediction and replacement.
+
         Args:
             proprio_seq: Tensor[B, S, prop_hist_len * proprio_dim]
             depth_seq: Tensor[B, S, depth_hist_len, H, W]
-            mems: Optional list of memory tensors from previous segment (should be detached)
-        
+            mems: Optional list of memory tensors from previous segment
+            delta_yaw_ok: Optional[B, S] bool tensor indicating which envs should use predicted yaw
+
         Returns:
             actions: Predicted action means of shape [B, S, action_dim]
+            yaw_pred_seq: Predicted yaw of shape [B, S, 2]
             new_mems: List of new memory tensors for next segment
         """
         batch_size, seq_len, feat_dim = proprio_seq.shape
-        
-        # 1. Encode proprio and depth
-        prop_encoded = self.proprio_encoder(
-            proprio_seq.reshape(batch_size * seq_len, feat_dim)
-        )  # [B*S, 1, C]
-        depth_encoded = self.depth_encoder(
-            depth_seq.reshape(batch_size * seq_len, depth_seq.size(2), depth_seq.size(3), depth_seq.size(4))
-        )  # [B*S, T, C]
-        
-        # 2. Multi-modal fusion
+
+        # 1. Prepare proprio for depth encoder (zero out delta_yaw to force visual prediction)
+        # Extract last frame proprio from the flattened sequence
+        proprio_flat = proprio_seq.reshape(batch_size * seq_len, feat_dim)  # [B*S, feat_dim]
+
+        # Get the last frame's proprio (assuming prop_hist_len frames are stacked)
+        # IMPORTANT: Zero out delta_yaw (indices 6:8) before passing to depth_encoder
+        proprio_for_encoder = proprio_flat[:, :self.num_prop].clone()  # [B*S, num_prop]
+        proprio_for_encoder[:, 6:8] = 0  # Zero out delta_yaw (matching train.py line 360)
+
+        # 2. Encode depth and extract yaw predictions
+        depth_output = self.depth_encoder(
+            depth_seq.reshape(batch_size * seq_len, depth_seq.size(2), depth_seq.size(3), depth_seq.size(4)),
+            proprio_for_encoder  # Pass zeroed proprio
+        )  # [B*S, num_tokens * token_dim + 2]
+
+        # Split into depth tokens and yaw
+        depth_tokens_flat = depth_output[:, :-2]  # [B*S, num_tokens * token_dim]
+        yaw_pred = depth_output[:, -2:]  # [B*S, 2]
+
+        # Scale yaw predictions by 1.5 (matching original implementation)
+        yaw_scaled = 1.5 * yaw_pred  # [B*S, 2]
+
+        # Reshape depth tokens back to [B*S, num_tokens, token_dim]
+        num_tokens = self.depth_encoder.grid_size * self.depth_encoder.grid_size
+        depth_encoded = depth_tokens_flat.reshape(batch_size * seq_len, num_tokens, self.token_dim)
+
+        # 3. Replace delta_yaw in proprio with predicted yaw
+        proprio_modified = proprio_flat.clone()
+
+        # Get indices for delta_yaw in the last frame
+        start_idx, end_idx = self._get_last_frame_indices(self.prop_hist_len, self.num_prop)
+
+        # Replace delta_yaw with scaled yaw predictions
+        if delta_yaw_ok is not None:
+            # Only replace where delta_yaw_ok is True
+            delta_yaw_ok_flat = delta_yaw_ok.reshape(batch_size * seq_len)  # [B*S]
+            proprio_modified[delta_yaw_ok_flat, start_idx:end_idx] = yaw_scaled[delta_yaw_ok_flat]
+        else:
+            # Replace for all environments (default behavior)
+            proprio_modified[:, start_idx:end_idx] = yaw_scaled
+
+        # 4. Encode proprio with replaced yaw
+        prop_encoded = self.proprio_encoder(proprio_modified)  # [B*S, 1, C]
+
+        # 5. Multi-modal fusion
         fused = self.fusion_transformer(prop_encoded, depth_encoded)
         fused_seq = fused["all_pooled"].reshape(batch_size, seq_len, -1)
-        
-        # 3. Temporal modeling with memory
+
+        # 6. Temporal modeling with memory
         temporal_out, new_mems = self.temporal_model(
             fused_seq,
-            mems=mems,           # Pass previous segment's mems (should be detached by caller)
+            mems=mems,
             causal_mask=True,
-            return_mems=True,    # Return new mems for next segment
+            return_mems=True,
         )
 
-        # 4. Action head
+        # 7. Action head
         actions = self.action_head.forward_sequence(temporal_out)["mean"]
-        return actions, None, new_mems
+
+        # Reshape yaw predictions back to sequence format
+        yaw_pred_seq = yaw_pred.reshape(batch_size, seq_len, 2)
+
+        return actions, yaw_pred_seq, new_mems
 
     def forward_step(
         self,
         proprio_step: Tensor,
         depth_step: Tensor,
         mems: Optional[List[Optional[Tensor]]] = None,
+        delta_yaw_ok: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor, Optional[List[Tensor]]]:
-        """单步前向接口，用于在线推理 / DAGGER。
+        """Single-step forward for online inference / DAGGER.
 
         Args:
             proprio_step: Tensor[B, prop_hist_len * proprio_dim]
             depth_step: Tensor[B, depth_hist_len, H, W]
-            mems: Transformer-XL 的记忆状态列表，长度等于 TXL 层数，或 None。
+            mems: Transformer-XL memory states
+            delta_yaw_ok: Optional[B] bool tensor indicating which envs should use predicted yaw
 
         Returns:
-            actions_step: Tensor[B, action_dim]，当前步动作均值。
-            new_mems: 更新后的记忆状态列表。
+            actions_step: Tensor[B, action_dim]
+            yaw_pred_step: Tensor[B, 2]
+            new_mems: Updated memory states
         """
         if proprio_step.dim() != 2:
             raise ValueError("proprio_step must have shape [B, F].")
         if depth_step.dim() != 4:
             raise ValueError("depth_step must have shape [B, T, H, W].")
 
-        batch_size = proprio_step.shape[0]
-        
         # Add sequence dimension S=1
         proprio_seq = proprio_step.unsqueeze(1)  # [B, 1, feat_dim]
         depth_seq = depth_step.unsqueeze(1)      # [B, 1, depth_hist_len, H, W]
-        
+
+        # Add sequence dimension to delta_yaw_ok if provided
+        delta_yaw_ok_seq = delta_yaw_ok.unsqueeze(1) if delta_yaw_ok is not None else None
+
         # Use forward_with_mems
-        actions_seq, yaw_pred_seq, new_mems = self.forward_with_mems(proprio_seq, depth_seq, mems=mems)
-        
+        actions_seq, yaw_pred_seq, new_mems = self.forward_with_mems(
+            proprio_seq, depth_seq, mems=mems, delta_yaw_ok=delta_yaw_ok_seq
+        )
+
         # Remove sequence dimension
-        actions_step = actions_seq.squeeze(1)
-        yaw_pred_step = yaw_pred_seq.squeeze(1) if yaw_pred_seq is not None else None
-        # print("debug: using mem in dagger.")  # [B, action_dim]
+        actions_step = actions_seq.squeeze(1)  # [B, action_dim]
+        yaw_pred_step = yaw_pred_seq.squeeze(1) if yaw_pred_seq is not None else None  # [B, 2]
+
         return actions_step, yaw_pred_step, new_mems
 
 

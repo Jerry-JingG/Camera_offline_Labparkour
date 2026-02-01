@@ -19,7 +19,7 @@ class CameraDropoutManager:
         dt: float = 0.02,
         prob_start_offline: float = 0.00,
         online_duration_range: tuple[float, float] = (2.0, 10.0),      # online_duration_range的最小值不应小于dt
-        offline_duration_range: tuple[float, float] = (1.0, 7.0)    # offline_duration_range的最小值也不应小于dt
+        offline_duration_range: tuple[float, float] = (2.0, 10.0)    # offline_duration_range的最小值也不应小于dt
     ):
         self.num_envs = num_envs
         self.device = device

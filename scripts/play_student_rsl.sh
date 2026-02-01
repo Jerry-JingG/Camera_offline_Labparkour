@@ -8,7 +8,7 @@ set -euo pipefail
 
 TASK_ID="Isaac-Extreme-Parkour-Teacher-Unitree-Go2-Play-v0"
 NUM_ENVS=16
-CHECKPOINT="/home/jing/IsaacLab/Camera_offline_Labparkour/logs/rsl_rl/unitree_go2_parkour/2025-12-30_22-14-25_12-30-teacher-1/model_49999.pt"
+CHECKPOINT="/home/jing/IsaacLab/Camera_offline_Labparkour/logs/rsl_rl/unitree_go2_parkour/2026-01-29_00-35-28_1-29-teacher-1/model_25900.pt"
 
 DEVICE_ARG="cuda:0"    # 可改为 cpu
 HEADLESS_FLAG=false    # 无界面可设为 true

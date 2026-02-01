@@ -21,7 +21,7 @@ DEVICE_ARG="cuda:0"                                      # --device
 # ------------------------------- 日志 / W&B 参数 -------------------------------
 LOGGER="wandb"                                                  # --logger：设置为 wandb 开启 W&B 记录，留空则关闭
 LOG_PROJECT_NAME="parkour-teacher"                              # --log_project_name：W&B Project 名
-RUN_NAME="12-30-teacher-1"                                           # --run_name：W&B run 名称前缀，可自定义/留空
+RUN_NAME="1-29-teacher-2"                                           # --run_name：W&B run 名称前缀，可自定义/留空
 # WANDB_API_KEY 如果此处不填，请确保环境变量中已设置
 WANDB_API_KEY="85897bb211dff1da90eca7244d836724804604d2" 
 WANDB_ENTITY="${WANDB_ENTITY:-}"                                # 可选：指定团队/空间
