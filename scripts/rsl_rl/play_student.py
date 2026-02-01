@@ -680,6 +680,11 @@ def main() -> None:
             print(f"  [37-48] actions (prev): {p[37:49].tolist()}")
             print(f"  [49-52] contact: {p[49]:.1f}, {p[50]:.1f}, {p[51]:.1f}, {p[52]:.1f}")
 
+        # Mask privileged information (delta_yaw at indices 6-7)
+        # Student policy should not have access to privileged direction info during inference
+        obs_prop = obs_prop.clone()  # Clone to avoid modifying original obs
+        obs_prop[:, 6:8] = 0  # Zero out delta_yaw and delta_next_yaw
+
         # 捕获推理前的 mems 状态 (用于录制)
         # 注意：TorchScript 模型期望固定大小的 mems [num_layers, mem_len, token_dim]
         # 但 PyTorch 运行时 mems 是动态增长的，开始时可能为空或长度小于 mem_len

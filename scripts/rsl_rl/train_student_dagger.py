@@ -41,13 +41,6 @@ PARKOUR_TASKS_ROOT = os.path.join(PROJECT_ROOT, "parkour_tasks")
 if PARKOUR_TASKS_ROOT not in sys.path:
     sys.path.insert(0, PARKOUR_TASKS_ROOT)
 
-# 确保 scripts/rsl_rl 目录在 sys.path 最前面，避免与 parkour_isaaclab/utils.py 冲突
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SCRIPT_DIR not in sys.path or sys.path.index(_SCRIPT_DIR) > 0:
-    if _SCRIPT_DIR in sys.path:
-        sys.path.remove(_SCRIPT_DIR)
-    sys.path.insert(0, _SCRIPT_DIR)
-
 # === Import aggregator and student policy (same directory) ===
 from train_student_from_dataset import SequenceAggregator, MultiModalStudentPolicy, TransformerXLTemporal
 from utils.dropout_manager import CameraDropoutManager
@@ -310,9 +303,6 @@ def main():
     except Exception:
         base_parkour = None
         num_goals = None
-    
-    # Butter for Closed-Loop Yaw Injection - Removed as requested
-    # last_yaw_pred = np.zeros((args.num_envs, 2), dtype=np.float32)
 
     # ===== main training loop =====
     train_start_t = time.time()
@@ -323,6 +313,9 @@ def main():
 
         obs, extras = vec_env.get_observations()
         obs = obs.to(device)
+
+        # Yaw buffer for loss calculation
+        yaws_buffer = []
 
         while batch is None:
             # --- prepare numpy obs for aggregator ---
@@ -337,9 +330,15 @@ def main():
             teacher_actions_cpu = teacher_actions.cpu()
             teacher_actions_np = teacher_actions_cpu.numpy()
 
-            # --- Mask Proprioception & Closed-Loop Injection (Removed as requested) ---
+            # --- Mask privileged information for student ---
+            # Teacher policy can see delta_yaw (indices 6-7) in obs_buf
+            # Student policy should not have access to this privileged direction info
+            # Indices:
+            #   6: delta_yaw (current target direction - robot yaw)
+            #   7: delta_next_yaw (next target direction - robot yaw)
             obs_prop_np_masked = obs_prop_np.copy()
-            
+            obs_prop_np_masked[:, 6:8] = 0  # Zero out delta_yaw and delta_next_yaw
+
             # --- student acting ---
             # build student input from its own histories (aggregator stores them)
             # aggregator.prop_history: [N, H, D], contains steps [t-H, ..., t-1]
@@ -372,9 +371,20 @@ def main():
             # TXL 单步推理：使用记忆状态 txl_mems
             student.eval()
             with torch.no_grad():
-                # Student prediction (yaw_pred removed from return values)
-                actions_step, new_mems = student.forward_step(prop_step, depth_step, mems=txl_mems)
+                # Define delta_yaw_ok masking (start with all True)
+                delta_yaw_ok = torch.ones(args.num_envs, dtype=torch.bool, device=device)
+
+                # Forward pass with delta_yaw_ok to get yaw predictions
+                actions_step, yaw_pred_step, new_mems = student.forward_step(
+                    prop_step, depth_step, mems=txl_mems, delta_yaw_ok=delta_yaw_ok
+                )
                 student_act = actions_step.cpu()
+
+                # Calculate yaw error for loss (true - predicted)
+                # Note: yaw_pred_step is the unscaled prediction, model scales by 1.5 internally
+                true_yaw = torch.from_numpy(obs_prop_np[:, 6:8]).float().to(device)  # [B, 2]
+                yaw_error = true_yaw - yaw_pred_step * 1.5  # Compare with scaled prediction
+                yaws_buffer.append(yaw_error.detach())
 
             # 在环境 step 前缓存当前的 goal 索引（否则 step 内部 reset 后 cur_goal_idx 会被清零）
             if base_parkour is not None and num_goals and num_goals > 0:
@@ -479,8 +489,22 @@ def main():
                     train_mems[l_idx] = torch.where(mask, torch.zeros_like(train_mems[l_idx]), train_mems[l_idx])
 
         loss_actions = nn.functional.mse_loss(pred, teacher_t)
-        
-        loss = loss_actions
+
+        # Calculate yaw loss
+        # Extract delta_yaw from batch proprio
+        # batch["proprio"] shape: [B, S, prop_hist_len * proprio_dim]
+        batch_size, seq_len, prop_feat_dim = batch["proprio"].shape
+        proprio_reshaped = batch["proprio"].reshape(batch_size, seq_len, args.prop_hist_len, num_prop)
+        proprio_last_frame = proprio_reshaped[:, :, -1, :]  # [B, S, num_prop]
+        true_yaw_train = torch.from_numpy(proprio_last_frame[:, :, 6:8]).float().to(device)  # [B, S, 2]
+
+        # Note: yaw_pred is the unscaled prediction from the model
+        # The model internally scales by 1.5 for proprio replacement, but returns unscaled
+        # So we compare scaled prediction with true yaw
+        loss_yaw = nn.functional.mse_loss(yaw_pred * 1.5, true_yaw_train)
+
+        # Total loss
+        loss = loss_actions + loss_yaw
 
         # 监控标签与残差的幅值，便于判断 loss 量级
         with torch.no_grad():
@@ -507,7 +531,8 @@ def main():
         steps_per_sec = steps_per_iter / iter_time if iter_time > 0 else 0.0
 
         print(
-            f"[iter {it}] loss={loss.item():.5f}   time={iter_time:.2f}s   eta={eta_str}   steps/s={steps_per_sec:.2f}   global_step={global_step}"
+            f"[iter {it}] loss={loss.item():.5f} (action={loss_actions.item():.5f}, yaw={loss_yaw.item():.5f})   "
+            f"time={iter_time:.2f}s   eta={eta_str}   steps/s={steps_per_sec:.2f}   global_step={global_step}"
         )
 
         # wandb logging
@@ -515,6 +540,7 @@ def main():
             wandb_metrics = {
                 "train/loss": loss.item(),
                 "train/loss_actions": loss_actions.item(),
+                "train/loss_yaw": loss_yaw.item(),
                 "time/iter_s": iter_time,
                 "time/eta_s": eta_seconds,
                 "time/elapsed_s": elapsed,
