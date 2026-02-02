@@ -91,3 +91,6 @@ runs/
 checkpoints/
 tmp/
 temp/
+
+# Git worktrees
+.worktrees/
