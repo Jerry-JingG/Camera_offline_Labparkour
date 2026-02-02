@@ -6,14 +6,14 @@ set -euo pipefail
 # ========= 基本配置 =========
 TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Play-v0"
 # 二选一：指定检查点文件或检查点目录
-STUDENT_CKPT="logs/rsl_rl/student_dagger_transformer/student-dagger-dropout-1-16/student_epoch_final.pt"   # 具体检查点文件
+STUDENT_CKPT="outputs/DAgger_ckpt/26_0116/student_epoch_final.pt"   # 具体检查点文件
 # CKPT_DIR="outputs/student_runs/run1"                       # 或指定目录（自动选择最新）
 
-NUM_ENVS=4
+NUM_ENVS=1
 PROP_HIST_LEN=1
 DEPTH_HIST_LEN=1
 MEM_LEN=128
-MAX_STEPS=5000
+MAX_STEPS=200
 DEVICE_ARG="cuda:0"
 
 # ========= 可视化配置 =========
@@ -22,8 +22,8 @@ HEADLESS=0   # 1 无头模式；0 带可视化
 # ========= 验证数据录制配置 =========
 # 设为 1 时，会录制 env_id=0 的 (proprio, depth, mems, action) 数据
 # 用于与 MuJoCo C++ LibTorch 推理结果进行对齐验证
-RECORD_DATA=0          # 0 关闭录制；1 开启录制
-RECORD_OUTPUT_PATH="/home/jing/IsaacLab/Camera_offline_Labparkour/obs_output/play_student_verify_data.bin"
+RECORD_DATA=1          # 0 关闭录制；1 开启录制
+RECORD_OUTPUT_PATH="/home/droplet/IsaacLab/Camera_offline_Labparkour/obs_output/isaac_tau_verification.bin"
 
 # ========= 脚本路径处理 =========
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

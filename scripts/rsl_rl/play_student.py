@@ -54,34 +54,38 @@ def _save_verification_data(
     depth_dim: int,
     action_dim: int,
     mems_dim: int,
+    tau_dim: int,
 ) -> None:
-    """Save recorded frames to binary file for C++ verification (v2 format with mems).
+    """Save recorded frames to binary file (v3 format with tau).
 
-    File format v2:
-        Header (24 bytes):
-            int32: version (= 2)
+    File format v3:
+        Header (28 bytes):
+            int32: version (= 3)
             int32: num_frames
             int32: prop_dim
             int32: depth_dim
             int32: action_dim
             int32: mems_dim
+            int32: tau_dim
         Body (repeated num_frames times):
             float32 * prop_dim: proprio data
             float32 * depth_dim: depth data (flattened)
-            float32 * mems_dim: mems data (flattened, 推理前状态)
+            float32 * mems_dim: mems data (flattened)
             float32 * action_dim: action data
+            float32 * tau_dim: tau data (joint torques)
     """
     num_frames = len(frames)
-    print(f"[INFO] Saving {num_frames} frames (v2 format with mems) to {output_path}")
+    print(f"[INFO] Saving {num_frames} frames (v3 format with tau) to {output_path}")
 
     with open(output_path, "wb") as f:
         # Write header
-        f.write(struct.pack("<i", 2))  # version
+        f.write(struct.pack("<i", 3))  # version = 3
         f.write(struct.pack("<i", num_frames))
         f.write(struct.pack("<i", prop_dim))
         f.write(struct.pack("<i", depth_dim))
         f.write(struct.pack("<i", action_dim))
         f.write(struct.pack("<i", mems_dim))
+        f.write(struct.pack("<i", tau_dim))
 
         # Write frames
         for frame in frames:
@@ -89,9 +93,49 @@ def _save_verification_data(
             f.write(frame["depth"].astype(np.float32).tobytes())
             f.write(frame["mems"].astype(np.float32).tobytes())
             f.write(frame["action"].astype(np.float32).tobytes())
+            f.write(frame["tau"].astype(np.float32).tobytes())
 
-    print(f"[INFO] Saved successfully. Header: version=2, frames={num_frames}, prop={prop_dim}, depth={depth_dim}, mems={mems_dim}, action={action_dim}")
+    print(f"[INFO] Saved successfully. Header: version=3, frames={num_frames}, tau={tau_dim}")
 
+
+def _save_proprio_only(
+    output_path: str,
+    proprio_frames: List[np.ndarray],
+    proprio_dim: int,
+) -> None:
+    """Save proprio-only data to binary file (matching MuJoCo's proprio recording format).
+
+    File format:
+        Header (12 bytes):
+            int32: num_frames
+            int32: proprio_dim
+            int32: proprio_dim (padding)
+        Body (repeated num_frames times):
+            float32 * proprio_dim: proprio data (53 dims)
+    """
+    num_frames = len(proprio_frames)
+    print(f"[INFO] Saving {num_frames} proprio-only frames to {output_path}")
+
+    with open(output_path, "wb") as f:
+        # Write header (matching MuJoCo format)
+        f.write(struct.pack("<i", num_frames))
+        f.write(struct.pack("<i", proprio_dim))
+        f.write(struct.pack("<i", proprio_dim))  # padding
+
+        # Write frames
+        for frame in proprio_frames:
+            f.write(frame.astype(np.float32).tobytes())
+
+    print(f"[INFO] Proprio saved successfully. frames={num_frames}, dim={proprio_dim}")
+    
+    # Print first frame summary for debugging
+    if proprio_frames:
+        first = proprio_frames[0]
+        print(f"[INFO] First frame summary:")
+        print(f"  [0-2] ang_vel*0.25: {first[0]:.6f}, {first[1]:.6f}, {first[2]:.6f}")
+        print(f"  [3-4] roll/pitch: {first[3]:.6f}, {first[4]:.6f}")
+        print(f"  [13-15] joint_pos[0-2]: {first[13]:.6f}, {first[14]:.6f}, {first[15]:.6f}")
+        print(f"  [49-52] contact: {first[49]:.1f}, {first[50]:.1f}, {first[51]:.1f}, {first[52]:.1f}")
 
 def find_latest_student_checkpoint(ckpt_dir: Path) -> Path:
     """Return the checkpoint with the highest epoch index in ckpt_dir."""
@@ -448,6 +492,7 @@ def parse_args_play() -> argparse.Namespace:
         help="TransformerXL memory length. Can be larger than training to attend to longer history.",
     )
     parser.add_argument("--max_steps", type=int, default=2000, help="Maximum steps to run.")
+    parser.add_argument("--free_cam", action="store_true", default=False, help="Disable follow camera for free-look.")
 
     # 录制验证数据相关参数
     parser.add_argument(
@@ -460,6 +505,25 @@ def parse_args_play() -> argparse.Namespace:
         type=str,
         default="/tmp/play_student_verify_data.bin",
         help="Output path for recorded verification data (binary format).",
+    )
+    
+    # Proprio-only recording (for comparison with MuJoCo)
+    parser.add_argument(
+        "--record_proprio",
+        action="store_true",
+        help="Enable recording of proprio-only (53 dims) for env_id=0 for comparison with MuJoCo.",
+    )
+    parser.add_argument(
+        "--record_proprio_output",
+        type=str,
+        default="/home/droplet/IsaacLab/Camera_offline_Labparkour/obs_output/isaac_proprio_verification.bin",
+        help="Output path for proprio-only recording (binary format matching MuJoCo).",
+    )
+    parser.add_argument(
+        "--record_proprio_max_frames",
+        type=int,
+        default=200,
+        help="Maximum frames to record for proprio-only recording.",
     )
 
     cli_args.add_rsl_rl_args(parser)
@@ -492,11 +556,21 @@ def main() -> None:
         use_fabric=not disable_fabric,
     )
     if not headless:
-        env_cfg.viewer.origin_type = "world"
-        spacing = float(env_cfg.scene.env_spacing)
-        grid = int(np.ceil(np.sqrt(args.num_envs)))
-        env_cfg.viewer.eye = [spacing * grid * 0.5, spacing * grid * 0.5, 3.0]
-        env_cfg.viewer.lookat = [0.0, 0.0, 0.5]
+        if args.free_cam:
+            # Static camera view (original behavior)
+            env_cfg.viewer.origin_type = "world"
+            spacing = float(env_cfg.scene.env_spacing)
+            grid = int(np.ceil(np.sqrt(args.num_envs)))
+            env_cfg.viewer.eye = [spacing * grid * 0.5, spacing * grid * 0.5, 3.0]
+            env_cfg.viewer.lookat = [0.0, 0.0, 0.5]
+            print("[INFO] Free camera enabled. Follow camera disabled.")
+        else:
+            # Camera follows robot (new default behavior)
+            env_cfg.viewer.asset_name = "robot"
+            env_cfg.viewer.origin_type = "asset_root"
+            env_cfg.viewer.eye = (-0., 2.6, 1.6)
+            env_cfg.viewer.lookat = (0.0, 0.0, 0.0)
+            print("[INFO] Camera following robot.")
     agent_cfg = cli_args.parse_rsl_rl_cfg(args.task, args)
 
     env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array" if not headless else None)
@@ -556,6 +630,15 @@ def main() -> None:
     if record_data:
         print(f"[INFO] Recording enabled. Will save to: {record_output}")
         print(f"[INFO] mems_dim = {mems_dim} (num_layers={runner.num_layers}, mem_len={runner.mem_len}, token_dim={runner.d_model})")
+    
+    # Proprio-only recording (for comparison with MuJoCo)
+    record_proprio = getattr(args, "record_proprio", False)
+    record_proprio_output = getattr(args, "record_proprio_output", 
+        "/home/droplet/IsaacLab/Camera_offline_Labparkour/obs_output/isaac_proprio_verification.bin")
+    record_proprio_max_frames = getattr(args, "record_proprio_max_frames", 200)
+    recorded_proprio_frames: List[np.ndarray] = []
+    if record_proprio:
+        print(f"[INFO] Proprio-only recording enabled. Will save {record_proprio_max_frames} frames to: {record_proprio_output}")
     # =====================================
 
     obs, extras = vec_env.get_observations()
@@ -575,6 +658,20 @@ def main() -> None:
         if step < 3:
             print(f"[DEBUG] depth_image stats: min={depth_image.min():.4f}, max={depth_image.max():.4f}, mean={depth_image.mean():.4f}")
         obs_prop = obs[:, :proprio_dim]
+        
+        # ===== DEBUG: Print proprio for first 3 frames =====
+        if step < 3:
+            p = obs_prop[0].cpu().numpy()  # Env 0
+            print(f"\n[PROPRIO DEBUG] IsaacLab Frame {step}:")
+            print(f"  [0-2] ang_vel*0.25: {p[0]:.6f}, {p[1]:.6f}, {p[2]:.6f}")
+            print(f"  [3-4] roll/pitch: {p[3]:.6f}, {p[4]:.6f}")
+            print(f"  [5-7] zeros/delta_yaw: {p[5]:.6f}, {p[6]:.6f}, {p[7]:.6f}")
+            print(f"  [8-10] zeros/cmd: {p[8]:.6f}, {p[9]:.6f}, {p[10]:.6f}")
+            print(f"  [11-12] terrain: {p[11]:.6f}, {p[12]:.6f}")
+            print(f"  [13-24] joint_pos-default: {p[13:25].tolist()}")
+            print(f"  [25-36] joint_vel*0.05: {p[25:37].tolist()}")
+            print(f"  [37-48] actions (prev): {p[37:49].tolist()}")
+            print(f"  [49-52] contact: {p[49]:.1f}, {p[50]:.1f}, {p[51]:.1f}, {p[52]:.1f}")
 
         # 捕获推理前的 mems 状态 (用于录制)
         # 注意：TorchScript 模型期望固定大小的 mems [num_layers, mem_len, token_dim]
@@ -639,6 +736,10 @@ def main() -> None:
 
             action_output = student_action[0].cpu().numpy()  # [action_dim]
 
+            # 获取 tau（从环境的 articulation 数据中）
+            # Isaac Lab 的 tau 存储在 asset.data.applied_torque 中
+            tau_output = vec_env.unwrapped.scene["robot"].data.applied_torque[0].cpu().numpy()  # [12]
+
             # 保存帧数据
             if pre_mems_0 is not None:
                 mems_flat = pre_mems_0.flatten()  # [num_layers * mem_len * token_dim]
@@ -647,8 +748,24 @@ def main() -> None:
                     "depth": depth_flat,
                     "mems": mems_flat,
                     "action": action_output,
+                    "tau": tau_output,
                 })
         # =============================================================
+        
+        # ========== Proprio-only recording (for MuJoCo comparison) ==========
+        if record_proprio and len(recorded_proprio_frames) < record_proprio_max_frames:
+            # Record the raw 53-dim proprio (before any history stacking)
+            # obs_prop is [num_envs, proprio_dim], we take env 0
+            proprio_raw = obs_prop[0].cpu().numpy()  # [53]
+            recorded_proprio_frames.append(proprio_raw.copy())
+            
+            # Debug: print first few frames
+            if len(recorded_proprio_frames) <= 3:
+                print(f"[ProprioRec] Frame {len(recorded_proprio_frames)-1} recorded (dim={len(proprio_raw)})")
+                print(f"  [0-2] ang_vel*0.25: {proprio_raw[0]:.6f}, {proprio_raw[1]:.6f}, {proprio_raw[2]:.6f}")
+                print(f"  [3-4] roll/pitch: {proprio_raw[3]:.6f}, {proprio_raw[4]:.6f}")
+                print(f"  [10] cmd_x: {proprio_raw[10]:.6f}")
+        # ====================================================================
         
         # Debug: 输出 env 0 前 5 步的 actions
         if step < DEBUG_STEPS:
@@ -694,10 +811,22 @@ def main() -> None:
             depth_dim=camera_resolution[0] * camera_resolution[1] * args.depth_hist_len,
             action_dim=int(meta["action_dim"]),
             mems_dim=mems_dim,
+            tau_dim=int(meta["action_dim"]),  # tau_dim = action_dim = 12
         )
     elif record_data:
         print("[WARNING] Recording enabled but no frames were captured.")
     # =================================
+    
+    # ========== Save proprio-only recording ==========
+    if record_proprio and recorded_proprio_frames:
+        _save_proprio_only(
+            record_proprio_output,
+            recorded_proprio_frames,
+            proprio_dim=proprio_dim,
+        )
+    elif record_proprio:
+        print("[WARNING] Proprio recording enabled but no frames were captured.")
+    # =================================================
 
     vec_env.close()
     simulation_app.close()
