@@ -116,6 +116,6 @@ if [[ -n "${WANDB_API_KEY:-}" && "${WANDB_MODE:-}" != "offline" ]]; then
     fi
 fi
 
-# --------------------------------- 执行 command -----------------------------------
+# --------------------------------- 执行命令 -----------------------------------
 echo "[INFO] Running parkour teacher training: ${TRAIN_CMD[*]}"
 "${TRAIN_CMD[@]}"

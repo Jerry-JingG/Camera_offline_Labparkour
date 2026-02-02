@@ -105,14 +105,21 @@ class ParkourViewportCameraController(ViewportCameraController):
                 self.free_cam_trigger = False 
 
     def _update_tracking_callback(self, event):
-        if self.cfg.origin_type == "asset_root" and self.cfg.asset_name is not None and not self.is_free_cam:
+        # check if asset and its data are initialized
+        if self.cfg.asset_name is None or self.cfg.asset_name not in self._env.scene.keys():
+            return
+        asset = self._env.scene[self.cfg.asset_name]
+        if not hasattr(asset, "data") or not hasattr(asset, "_data") or asset._data is None:
+            return
+
+        if self.cfg.origin_type == "asset_root" and not self.is_free_cam:
             self.update_view_to_asset_root(self.cfg.asset_name)
-        if self.cfg.origin_type == "asset_body" and self.cfg.asset_name is not None and self.cfg.body_name is not None and not self.is_free_cam:
+        if self.cfg.origin_type == "asset_body" and self.cfg.body_name is not None and not self.is_free_cam:
             self.update_view_to_asset_body(self.cfg.asset_name, self.cfg.body_name)
 
         if self.is_free_cam and self.free_cam_trigger:
             self.free_cam_trigger = False 
-            if self.cfg.origin_type == "asset_root" and self.cfg.asset_name is not None :
+            if self.cfg.origin_type == "asset_root":
                 self.update_view_to_asset_root(self.cfg.asset_name)
-            if self.cfg.origin_type == "asset_body" and self.cfg.asset_name is not None and self.cfg.body_name is not None:
+            if self.cfg.origin_type == "asset_body" and self.cfg.body_name is not None:
                 self.update_view_to_asset_body(self.cfg.asset_name, self.cfg.body_name)

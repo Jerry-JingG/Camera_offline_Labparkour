@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# Multi-Env Terrain Generator for MuJoCo
+# Multi-Env Terrain Generator for MuJoCo (with Beam Terrain)
 # ============================================================================
 # 快速调整参数生成跑酷地形
 # Usage: ./run_export_terrain.sh
@@ -18,8 +18,8 @@ DIFFICULTY_MAX=0.8  # 最高难度（最后一行）
 # 随机种子（改变种子会生成不同的地形）
 SEED=42
 
-# 是否自动运行测试程序
-AUTO_TEST=true
+# 是否自动打开 MuJoCo 查看器
+AUTO_VIEW=true
 # =================================================
 
 # 切换到脚本所在目录
@@ -28,6 +28,7 @@ cd "$SCRIPT_DIR"
 
 echo "=============================================="
 echo "  Multi-Env Parkour Terrain Generator"
+echo "  (with Beam Terrain - Jingg branch)"
 echo "=============================================="
 echo ""
 echo "Configuration:"
@@ -35,9 +36,10 @@ echo "  Grid:       ${NUM_ROWS} rows × ${NUM_COLS} cols = $((NUM_ROWS * NUM_COL
 echo "  Difficulty: ${DIFFICULTY_MIN} - ${DIFFICULTY_MAX}"
 echo "  Seed:       ${SEED}"
 echo ""
+echo "Terrain types: gap, hurdle, flat, step, beam (20% each)"
+echo ""
 
-# Step 1: 生成地形
-echo "Step 1: Generating terrain..."
+# 生成地形
 python export_multi_env_terrain.py \
     --num_rows "$NUM_ROWS" \
     --num_cols "$NUM_COLS" \
@@ -50,11 +52,10 @@ if [ $? -eq 0 ]; then
     echo ""
     echo "✅ Terrain generation complete!"
     
-    # Step 2: 运行测试程序
-    if [ "$AUTO_TEST" = true ]; then
+    if [ "$AUTO_VIEW" = true ]; then
         echo ""
-        echo "Step 2: Running MuJoCo collision test..."
-        python test_mujoco_hfield.py
+        echo "Opening MuJoCo viewer..."
+        python -m mujoco.viewer output/multi_env_terrain_scene.xml
     fi
 else
     echo ""

@@ -224,8 +224,8 @@ class image_features(ManagerTermBase):
         return depth_image
 
     def _crop_depth_image(self, depth_image):
-        # crop 30 pixels from the left and right and and 20 pixels from bottom and return croped image
-        return depth_image[:-2, 4:-4]
+        # No cropping - use original 58x87 resolution to match train.py distillation
+        return depth_image
 
     def _normalize_depth_image(self, depth_image):
         depth_image = depth_image  # make similiar to scandot 

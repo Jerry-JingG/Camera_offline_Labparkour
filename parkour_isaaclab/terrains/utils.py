@@ -58,7 +58,7 @@ def parkour_field_to_mesh(func: Callable) -> Callable:
         
         # Combine meshes
         all_meshes = [mesh] + extra_meshes
-
+        
         # compute origin
         x1 = int((cfg.size[0] * 0.5 - 1) / cfg.horizontal_scale)
         x2 = int((cfg.size[0] * 0.5 + 1) / cfg.horizontal_scale)

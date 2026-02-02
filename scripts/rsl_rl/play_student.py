@@ -11,6 +11,7 @@ from collections import deque
 import argparse
 import os
 import re
+import struct
 import sys
 import time
 from pathlib import Path
@@ -19,6 +20,8 @@ import importlib.util
 import numpy as np
 
 import torch
+
+from utils.camera_blackout_manager import CameraBlackoutManager
 
 from isaaclab.app import AppLauncher
 
@@ -43,8 +46,96 @@ sys.modules[_spec.name] = _module
 _spec.loader.exec_module(_module)
 MultiModalStudentPolicy = _module.MultiModalStudentPolicy
 
-from utils.dropout_manager import CameraDropoutManager
 
+def _save_verification_data(
+    output_path: str,
+    frames: List[Dict[str, np.ndarray]],
+    prop_dim: int,
+    depth_dim: int,
+    action_dim: int,
+    mems_dim: int,
+    tau_dim: int,
+) -> None:
+    """Save recorded frames to binary file (v3 format with tau).
+
+    File format v3:
+        Header (28 bytes):
+            int32: version (= 3)
+            int32: num_frames
+            int32: prop_dim
+            int32: depth_dim
+            int32: action_dim
+            int32: mems_dim
+            int32: tau_dim
+        Body (repeated num_frames times):
+            float32 * prop_dim: proprio data
+            float32 * depth_dim: depth data (flattened)
+            float32 * mems_dim: mems data (flattened)
+            float32 * action_dim: action data
+            float32 * tau_dim: tau data (joint torques)
+    """
+    num_frames = len(frames)
+    print(f"[INFO] Saving {num_frames} frames (v3 format with tau) to {output_path}")
+
+    with open(output_path, "wb") as f:
+        # Write header
+        f.write(struct.pack("<i", 3))  # version = 3
+        f.write(struct.pack("<i", num_frames))
+        f.write(struct.pack("<i", prop_dim))
+        f.write(struct.pack("<i", depth_dim))
+        f.write(struct.pack("<i", action_dim))
+        f.write(struct.pack("<i", mems_dim))
+        f.write(struct.pack("<i", tau_dim))
+
+        # Write frames
+        for frame in frames:
+            f.write(frame["proprio"].astype(np.float32).tobytes())
+            f.write(frame["depth"].astype(np.float32).tobytes())
+            f.write(frame["mems"].astype(np.float32).tobytes())
+            f.write(frame["action"].astype(np.float32).tobytes())
+            f.write(frame["tau"].astype(np.float32).tobytes())
+
+    print(f"[INFO] Saved successfully. Header: version=3, frames={num_frames}, tau={tau_dim}")
+
+
+def _save_proprio_only(
+    output_path: str,
+    proprio_frames: List[np.ndarray],
+    proprio_dim: int,
+) -> None:
+    """Save proprio-only data to binary file (matching MuJoCo's proprio recording format).
+
+    File format:
+        Header (12 bytes):
+            int32: num_frames
+            int32: proprio_dim
+            int32: proprio_dim (padding)
+        Body (repeated num_frames times):
+            float32 * proprio_dim: proprio data (53 dims)
+    """
+    num_frames = len(proprio_frames)
+    print(f"[INFO] Saving {num_frames} proprio-only frames to {output_path}")
+
+    with open(output_path, "wb") as f:
+        # Write header (matching MuJoCo format)
+        f.write(struct.pack("<i", num_frames))
+        f.write(struct.pack("<i", proprio_dim))
+        f.write(struct.pack("<i", proprio_dim))  # padding
+
+        # Write frames
+        for frame in proprio_frames:
+            f.write(frame.astype(np.float32).tobytes())
+
+    print(f"[INFO] Proprio saved successfully. frames={num_frames}, dim={proprio_dim}")
+    
+    # Print first frame summary for debugging
+    if proprio_frames:
+        first = proprio_frames[0]
+        print(f"[INFO] First frame summary:")
+        print(f"  [0-2] ang_vel*0.25: {first[0]:.6f}, {first[1]:.6f}, {first[2]:.6f}")
+        print(f"  [3-4] roll/pitch: {first[3]:.6f}, {first[4]:.6f}")
+        print(f"  [13-15] joint_pos[0-2]: {first[13]:.6f}, {first[14]:.6f}, {first[15]:.6f}")
+        print(f"  [49-52] contact: {first[49]:.1f}, {first[50]:.1f}, {first[51]:.1f}, {first[52]:.1f}")
 
 def find_latest_student_checkpoint(ckpt_dir: Path) -> Path:
     """Return the checkpoint with the highest epoch index in ckpt_dir."""
@@ -124,44 +215,6 @@ def load_student_policy_for_play(
     model.to(device)
     model.eval()
     return model, meta
-
-
-class DropoutKeyboardHandler:
-    def __init__(self, dropout_manager: CameraDropoutManager, carb_lib, omni_lib):
-        self.dropout_manager = dropout_manager
-        self._carb = carb_lib
-        self._omni = omni_lib
-        self._input = self._carb.input.acquire_input_interface()
-        self._app_window = self._omni.appwindow.get_default_app_window()
-        self._keyboard = self._app_window.get_keyboard()
-        self._keyboard_sub = self._input.subscribe_to_keyboard_events(
-            self._keyboard, self._on_keyboard_event
-        )
-        self.enabled = True
-        self.original_prob = dropout_manager.prob_start_offline
-
-    def _on_keyboard_event(self, event, *args, **kwargs):
-        if event.type == self._carb.input.KeyboardEventType.KEY_PRESS:
-            if event.input == self._carb.input.KeyboardInput.RIGHT_BRACKET: # ']'
-                self.dropout_manager.prob_start_offline = min(1.0, self.dropout_manager.prob_start_offline + 0.05)
-                print(f"[Dropout] Probability increased to: {self.dropout_manager.prob_start_offline:.2f}")
-            elif event.input == self._carb.input.KeyboardInput.LEFT_BRACKET: # '['
-                self.dropout_manager.prob_start_offline = max(0.0, self.dropout_manager.prob_start_offline - 0.05)
-                print(f"[Dropout] Probability decreased to: {self.dropout_manager.prob_start_offline:.2f}")
-            elif event.input == self._carb.input.KeyboardInput.O: # 'O'
-                if self.enabled:
-                    self.original_prob = self.dropout_manager.prob_start_offline
-                    self.dropout_manager.prob_start_offline = 0.0
-                    self.enabled = False
-                    print("[Dropout] Disabled (Probability set to 0.0)")
-                else:
-                    self.dropout_manager.prob_start_offline = self.original_prob
-                    self.enabled = True
-                    print(f"[Dropout] Enabled (Probability restored to: {self.dropout_manager.prob_start_offline:.2f})")
-
-    def __del__(self):
-        if hasattr(self, "_keyboard_sub") and self._keyboard_sub:
-            self._input.unsubscribe_from_keyboard_events(self._keyboard, self._keyboard_sub)
 
 
 class StudentOnlineRunner:
@@ -259,42 +312,42 @@ class StudentOnlineRunner:
                     for _ in range(self.num_layers)
                 ]
 
-    def debug_print_mems(self, step: int, env_id: int = 0) -> None:
-        """
-        打印指定环境的 TransformerXL 记忆状态，用于调试。
+    # def debug_print_mems(self, step: int, env_id: int = 0) -> None:
+    #     """
+    #     打印指定环境的 TransformerXL 记忆状态，用于调试。
         
-        Args:
-            step: 当前时间步
-            env_id: 要查看的环境 ID（默认为 0）
-        """
-        if env_id >= self.num_envs:
-            print(f"[debug_mems] env_id={env_id} 超出范围 (num_envs={self.num_envs})")
-            return
+    #     Args:
+    #         step: 当前时间步
+    #         env_id: 要查看的环境 ID（默认为 0）
+    #     """
+    #     if env_id >= self.num_envs:
+    #         print(f"[debug_mems] env_id={env_id} 超出范围 (num_envs={self.num_envs})")
+    #         return
         
-        print(f"\n{'='*60}")
-        print(f"[debug_mems] Step={step}, Env={env_id}")
-        print(f"{'='*60}")
+    #     print(f"\n{'='*60}")
+    #     print(f"[debug_mems] Step={step}, Env={env_id}")
+    #     print(f"{'='*60}")
         
-        for layer_id in range(self.num_layers):
-            mem = self.mems[env_id][layer_id]
-            mem_len = mem.size(1)
+    #     for layer_id in range(self.num_layers):
+    #         mem = self.mems[env_id][layer_id]
+    #         mem_len = mem.size(1)
             
-            if mem_len == 0:
-                print(f"  Layer {layer_id}: mem_len=0 (empty)")
-            else:
-                mem_mean = mem.mean().item()
-                mem_std = mem.std().item()
-                mem_norm = mem.norm().item()
-                mem_abs_max = mem.abs().max().item()
+    #         if mem_len == 0:
+    #             print(f"  Layer {layer_id}: mem_len=0 (empty)")
+    #         else:
+    #             mem_mean = mem.mean().item()
+    #             mem_std = mem.std().item()
+    #             mem_norm = mem.norm().item()
+    #             mem_abs_max = mem.abs().max().item()
                 
-                print(f"  Layer {layer_id}: mem_len={mem_len:3d} | "
-                      f"mean={mem_mean:+.4f} | std={mem_std:.4f} | "
-                      f"norm={mem_norm:.4f} | abs_max={mem_abs_max:.4f}")
+    #             print(f"  Layer {layer_id}: mem_len={mem_len:3d} | "
+    #                   f"mean={mem_mean:+.4f} | std={mem_std:.4f} | "
+    #                   f"norm={mem_norm:.4f} | abs_max={mem_abs_max:.4f}")
         
-        # 打印所有环境的 mem 长度概览
-        all_mem_lens = [self.mems[i][0].size(1) for i in range(self.num_envs)]
-        print(f"  All envs mem_len: {all_mem_lens}")
-        print(f"{'='*60}\n")
+    #     # 打印所有环境的 mem 长度概览
+    #     all_mem_lens = [self.mems[i][0].size(1) for i in range(self.num_envs)]
+    #     print(f"  All envs mem_len: {all_mem_lens}")
+    #     print(f"{'='*60}\n")
 
     def act(
         self,
@@ -342,10 +395,10 @@ class StudentOnlineRunner:
             for layer_id in range(self.num_layers):
                 self.mems[env_id][layer_id] = new_mems_batch[layer_id][env_id:env_id+1].detach()
 
-        # Debug: 每 50 步打印一次 mems 状态
-        self.step_count += 1
-        if self.step_count % 50 == 0:
-            self.debug_print_mems(self.step_count, env_id=0)
+        # # Debug: 每 50 步打印一次 mems 状态
+        # self.step_count += 1
+        # if self.step_count % 50 == 0:
+        #     self.debug_print_mems(self.step_count, env_id=0)
 
         return actions.squeeze(1)  # [B, action_dim]
 
@@ -439,12 +492,39 @@ def parse_args_play() -> argparse.Namespace:
         help="TransformerXL memory length. Can be larger than training to attend to longer history.",
     )
     parser.add_argument("--max_steps", type=int, default=2000, help="Maximum steps to run.")
+    parser.add_argument("--free_cam", action="store_true", default=False, help="Disable follow camera for free-look.")
 
-    # Camera dropout arguments
-    parser.add_argument("--dropout_prob", type=float, default=0.0, help="Initial probability of camera being offline.")
-    parser.add_argument("--online_duration", type=float, nargs=2, default=[2.0, 10.0], help="Range for online duration in seconds (min max).")
-    parser.add_argument("--offline_duration", type=float, nargs=2, default=[1.0, 7.0], help="Range for offline duration in seconds (min max).")
-    parser.add_argument("--show_depth", action="store_true", default=False, help="Show depth camera images in a cv2 window.")
+    # 录制验证数据相关参数
+    parser.add_argument(
+        "--record_data",
+        action="store_true",
+        help="Enable recording of (proprio, depth, mems, action) for env_id=0 for verification.",
+    )
+    parser.add_argument(
+        "--record_output",
+        type=str,
+        default="/tmp/play_student_verify_data.bin",
+        help="Output path for recorded verification data (binary format).",
+    )
+    
+    # Proprio-only recording (for comparison with MuJoCo)
+    parser.add_argument(
+        "--record_proprio",
+        action="store_true",
+        help="Enable recording of proprio-only (53 dims) for env_id=0 for comparison with MuJoCo.",
+    )
+    parser.add_argument(
+        "--record_proprio_output",
+        type=str,
+        default="/home/droplet/IsaacLab/Camera_offline_Labparkour/obs_output/isaac_proprio_verification.bin",
+        help="Output path for proprio-only recording (binary format matching MuJoCo).",
+    )
+    parser.add_argument(
+        "--record_proprio_max_frames",
+        type=int,
+        default=200,
+        help="Maximum frames to record for proprio-only recording.",
+    )
 
     cli_args.add_rsl_rl_args(parser)
     AppLauncher.add_app_launcher_args(parser)
@@ -461,11 +541,6 @@ def main() -> None:
     app_launcher = AppLauncher(args)
     simulation_app = app_launcher.app
 
-    # Deferred imports (Required after SimulationApp is initialized)
-    import carb
-    import cv2
-    import omni
-
     import parkour_tasks  # noqa: F401  # ensure tasks register after Isaac app is initialized
 
     import gymnasium as gym
@@ -481,11 +556,21 @@ def main() -> None:
         use_fabric=not disable_fabric,
     )
     if not headless:
-        env_cfg.viewer.origin_type = "world"
-        spacing = float(env_cfg.scene.env_spacing)
-        grid = int(np.ceil(np.sqrt(args.num_envs)))
-        env_cfg.viewer.eye = [spacing * grid * 0.5, spacing * grid * 0.5, 3.0]
-        env_cfg.viewer.lookat = [0.0, 0.0, 0.5]
+        if args.free_cam:
+            # Static camera view (original behavior)
+            env_cfg.viewer.origin_type = "world"
+            spacing = float(env_cfg.scene.env_spacing)
+            grid = int(np.ceil(np.sqrt(args.num_envs)))
+            env_cfg.viewer.eye = [spacing * grid * 0.5, spacing * grid * 0.5, 3.0]
+            env_cfg.viewer.lookat = [0.0, 0.0, 0.5]
+            print("[INFO] Free camera enabled. Follow camera disabled.")
+        else:
+            # Camera follows robot (new default behavior)
+            env_cfg.viewer.asset_name = "robot"
+            env_cfg.viewer.origin_type = "asset_root"
+            env_cfg.viewer.eye = (-0., 2.6, 1.6)
+            env_cfg.viewer.lookat = (0.0, 0.0, 0.0)
+            print("[INFO] Camera following robot.")
     agent_cfg = cli_args.parse_rsl_rl_cfg(args.task, args)
 
     env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array" if not headless else None)
@@ -529,16 +614,32 @@ def main() -> None:
     )
     runner.reset()
 
-    # Initialize Camera Dropout Manager
-    dropout_manager = CameraDropoutManager(
+    # 初始化相机全黑管理器
+    blackout_manager = CameraBlackoutManager(
         num_envs=vec_env.num_envs,
         device=device,
-        dt=env_cfg.sim.dt * env_cfg.sim.render_interval, # Assuming dt is simulation step
-        prob_start_offline=args.dropout_prob,
-        online_duration_range=tuple(args.online_duration),
-        offline_duration_range=tuple(args.offline_duration)
     )
-    keyboard_handler = DropoutKeyboardHandler(dropout_manager, carb_lib=carb, omni_lib=omni)
+    print(f"[INFO] CameraBlackoutManager initialized: all {vec_env.num_envs} envs will have blackout camera.")
+
+    # ========== 录制相关初始化 ==========
+    record_data = getattr(args, "record_data", False)
+    record_output = getattr(args, "record_output", "/tmp/play_student_verify_data.bin")
+    recorded_frames: List[Dict[str, np.ndarray]] = []
+    # mems_dim = num_layers * mem_len * token_dim
+    mems_dim = runner.num_layers * runner.mem_len * runner.d_model
+    if record_data:
+        print(f"[INFO] Recording enabled. Will save to: {record_output}")
+        print(f"[INFO] mems_dim = {mems_dim} (num_layers={runner.num_layers}, mem_len={runner.mem_len}, token_dim={runner.d_model})")
+    
+    # Proprio-only recording (for comparison with MuJoCo)
+    record_proprio = getattr(args, "record_proprio", False)
+    record_proprio_output = getattr(args, "record_proprio_output", 
+        "/home/droplet/IsaacLab/Camera_offline_Labparkour/obs_output/isaac_proprio_verification.bin")
+    record_proprio_max_frames = getattr(args, "record_proprio_max_frames", 200)
+    recorded_proprio_frames: List[np.ndarray] = []
+    if record_proprio:
+        print(f"[INFO] Proprio-only recording enabled. Will save {record_proprio_max_frames} frames to: {record_proprio_output}")
+    # =====================================
 
     obs, extras = vec_env.get_observations()
     step = 0
@@ -552,12 +653,119 @@ def main() -> None:
         if depth_image is None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
 
+        # 应用相机全黑效果
+        depth_image = blackout_manager.update(depth_image)
+        if step < 3:
+            print(f"[DEBUG] depth_image stats: min={depth_image.min():.4f}, max={depth_image.max():.4f}, mean={depth_image.mean():.4f}")
         obs_prop = obs[:, :proprio_dim]
+        
+        # ===== DEBUG: Print proprio for first 3 frames =====
+        if step < 3:
+            p = obs_prop[0].cpu().numpy()  # Env 0
+            print(f"\n[PROPRIO DEBUG] IsaacLab Frame {step}:")
+            print(f"  [0-2] ang_vel*0.25: {p[0]:.6f}, {p[1]:.6f}, {p[2]:.6f}")
+            print(f"  [3-4] roll/pitch: {p[3]:.6f}, {p[4]:.6f}")
+            print(f"  [5-7] zeros/delta_yaw: {p[5]:.6f}, {p[6]:.6f}, {p[7]:.6f}")
+            print(f"  [8-10] zeros/cmd: {p[8]:.6f}, {p[9]:.6f}, {p[10]:.6f}")
+            print(f"  [11-12] terrain: {p[11]:.6f}, {p[12]:.6f}")
+            print(f"  [13-24] joint_pos-default: {p[13:25].tolist()}")
+            print(f"  [25-36] joint_vel*0.05: {p[25:37].tolist()}")
+            print(f"  [37-48] actions (prev): {p[37:49].tolist()}")
+            print(f"  [49-52] contact: {p[49]:.1f}, {p[50]:.1f}, {p[51]:.1f}, {p[52]:.1f}")
 
-        # Apply Camera Dropout
-        depth_image = dropout_manager.update(depth_image)
+        # 捕获推理前的 mems 状态 (用于录制)
+        # 注意：TorchScript 模型期望固定大小的 mems [num_layers, mem_len, token_dim]
+        # 但 PyTorch 运行时 mems 是动态增长的，开始时可能为空或长度小于 mem_len
+        # 因此需要左侧零填充到完整的 mem_len
+        pre_mems_0 = None
+
+        # Debug: 检查 mems 是否为空
+        if record_data and step < 5:
+            if len(runner.mems) == 0:
+                print(f"[DEBUG] Frame {step}: runner.mems is EMPTY (no environments initialized)")
+            elif len(runner.mems[0]) == 0:
+                print(f"[DEBUG] Frame {step}: runner.mems[0] is EMPTY (no layers)")
+            else:
+                print(f"[DEBUG] Frame {step}: runner.mems[0] has {len(runner.mems[0])} layers")
+
+        if record_data and len(runner.mems) > 0:
+            # Debug: 输出前 5 帧的 mems 状态
+            if step < 5:
+                mems_lengths = [m.size(1) for m in runner.mems[0]]
+                print(f"[DEBUG] Frame {step}: mems[0] lengths = {mems_lengths} (expected: {runner.mem_len})")
+                print(f"        num_layers = {len(runner.mems[0])}, d_model = {runner.d_model}")
+
+            padded_mems = []
+            for layer_idx, m in enumerate(runner.mems[0]):
+                # m 的形状是 [1, current_len, d_model]，current_len 可能 < mem_len
+                current_len = m.size(1)
+                if current_len < runner.mem_len:
+                    pad_len = runner.mem_len - current_len
+                    padding = torch.zeros(1, pad_len, runner.d_model, device=runner.device)
+                    m_padded = torch.cat([padding, m], dim=1)  # 左侧填充零
+
+                    # Debug: 输出填充信息
+                    if step < 5:
+                        print(f"        Layer {layer_idx}: padded {pad_len} zeros (left), current_len={current_len}")
+                else:
+                    m_padded = m
+                    if step < 5:
+                        print(f"        Layer {layer_idx}: no padding needed, current_len={current_len}")
+
+                padded_mems.append(m_padded.squeeze(0))  # [mem_len, d_model]
+            pre_mems_0 = torch.stack(padded_mems, dim=0).cpu().numpy()  # [num_layers, mem_len, token_dim]
+
+            # Debug: 输出填充后的统计信息
+            if step < 5:
+                print(f"        Final mems shape: {pre_mems_0.shape}")
+                print(f"        Mems stats: min={pre_mems_0.min():.4f}, max={pre_mems_0.max():.4f}, mean={pre_mems_0.mean():.4f}")
+                print(f"        Zero ratio: {(pre_mems_0 == 0).sum() / pre_mems_0.size * 100:.1f}%")
 
         student_action = runner.act(obs_prop, depth_image)
+
+        # ========== 录制: 在推理后保存 env_id=0 的输入和输出 ==========
+        if record_data:
+            # 在 act() 之后读取更新后的历史 (包含当前帧)
+            prop_hist_0 = runner.prop_histories[0]
+            depth_hist_0 = runner.depth_histories[0]
+
+            # 拼接历史帧构建输入
+            prop_input = torch.cat(list(prop_hist_0), dim=0).cpu().numpy()  # [prop_hist_len * proprio_dim]
+            depth_input = torch.stack(list(depth_hist_0), dim=0).cpu().numpy()  # [depth_hist_len, H, W]
+            depth_flat = depth_input.flatten()  # [depth_hist_len * H * W]
+
+            action_output = student_action[0].cpu().numpy()  # [action_dim]
+
+            # 获取 tau（从环境的 articulation 数据中）
+            # Isaac Lab 的 tau 存储在 asset.data.applied_torque 中
+            tau_output = vec_env.unwrapped.scene["robot"].data.applied_torque[0].cpu().numpy()  # [12]
+
+            # 保存帧数据
+            if pre_mems_0 is not None:
+                mems_flat = pre_mems_0.flatten()  # [num_layers * mem_len * token_dim]
+                recorded_frames.append({
+                    "proprio": prop_input,
+                    "depth": depth_flat,
+                    "mems": mems_flat,
+                    "action": action_output,
+                    "tau": tau_output,
+                })
+        # =============================================================
+        
+        # ========== Proprio-only recording (for MuJoCo comparison) ==========
+        if record_proprio and len(recorded_proprio_frames) < record_proprio_max_frames:
+            # Record the raw 53-dim proprio (before any history stacking)
+            # obs_prop is [num_envs, proprio_dim], we take env 0
+            proprio_raw = obs_prop[0].cpu().numpy()  # [53]
+            recorded_proprio_frames.append(proprio_raw.copy())
+            
+            # Debug: print first few frames
+            if len(recorded_proprio_frames) <= 3:
+                print(f"[ProprioRec] Frame {len(recorded_proprio_frames)-1} recorded (dim={len(proprio_raw)})")
+                print(f"  [0-2] ang_vel*0.25: {proprio_raw[0]:.6f}, {proprio_raw[1]:.6f}, {proprio_raw[2]:.6f}")
+                print(f"  [3-4] roll/pitch: {proprio_raw[3]:.6f}, {proprio_raw[4]:.6f}")
+                print(f"  [10] cmd_x: {proprio_raw[10]:.6f}")
+        # ====================================================================
         
         # Debug: 输出 env 0 前 5 步的 actions
         if step < DEBUG_STEPS:
@@ -589,31 +797,36 @@ def main() -> None:
         done_mask = dones.squeeze(-1).bool()
         if done_mask.any():
             runner.reset_done(done_mask)
-            dropout_manager.reset_env(done_mask)
-
-        # Depth Visualization
-        if args.show_depth:
-            # Construct a grid of depth images
-            # depth_image shape is [num_envs, H, W]
-            # Normalization from [-0.5, 0.5] to [0, 1]
-            depth_vis = (depth_image.detach().cpu().numpy() + 0.5).clip(0, 1)
-            
-            num_envs = depth_vis.shape[0]
-            ncols = int(np.ceil(np.sqrt(num_envs)))
-            nrows = int(np.ceil(num_envs / ncols))
-            
-            H, W = depth_vis.shape[1], depth_vis.shape[2]
-            grid = np.zeros((nrows * H, ncols * W), dtype=np.float32)
-            
-            for i in range(num_envs):
-                r, c = i // ncols, i % ncols
-                grid[r*H:(r+1)*H, c*W:(c+1)*W] = depth_vis[i]
-            
-            cv2.imshow("Depth Camera (Dropouts applied)", grid)
-            cv2.waitKey(1)
+            blackout_manager.reset_env(done_mask)
 
         obs = obs_next
         step += 1
+
+    # ========== 保存录制数据 ==========
+    if record_data and recorded_frames:
+        _save_verification_data(
+            record_output,
+            recorded_frames,
+            prop_dim=proprio_dim * args.prop_hist_len,
+            depth_dim=camera_resolution[0] * camera_resolution[1] * args.depth_hist_len,
+            action_dim=int(meta["action_dim"]),
+            mems_dim=mems_dim,
+            tau_dim=int(meta["action_dim"]),  # tau_dim = action_dim = 12
+        )
+    elif record_data:
+        print("[WARNING] Recording enabled but no frames were captured.")
+    # =================================
+    
+    # ========== Save proprio-only recording ==========
+    if record_proprio and recorded_proprio_frames:
+        _save_proprio_only(
+            record_proprio_output,
+            recorded_proprio_frames,
+            proprio_dim=proprio_dim,
+        )
+    elif record_proprio:
+        print("[WARNING] Proprio recording enabled but no frames were captured.")
+    # =================================================
 
     vec_env.close()
     simulation_app.close()

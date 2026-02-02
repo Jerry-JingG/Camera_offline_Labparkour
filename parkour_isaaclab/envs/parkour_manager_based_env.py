@@ -79,15 +79,6 @@ class ParkourManagerBasedEnv(ManagerBasedEnv):
             self.scene = InteractiveScene(self.cfg.scene)
         print("[INFO]: Scene manager: ", self.scene)
 
-        # set up camera viewport controller
-        # viewport is not available in other rendering modes so the function will throw a warning
-        # FIXME: This needs to be fixed in the future when we unify the UI functionalities even for
-        # non-rendering modes.
-        if self.sim.render_mode >= self.sim.RenderMode.PARTIAL_RENDERING:
-            self.viewport_camera_controller = ParkourViewportCameraController(self, self.cfg.viewer)
-        else:
-            self.viewport_camera_controller = None
-
         # create event manager
         # note: this is needed here (rather than after simulation play) to allow USD-related randomization events
         #   that must happen before the simulation starts. Example: randomizing mesh scale
@@ -110,6 +101,15 @@ class ParkourManagerBasedEnv(ManagerBasedEnv):
                 self.scene.update(dt=self.physics_dt)
             # add timeline event to load managers
             self.load_managers()
+
+        # set up camera viewport controller
+        # viewport is not available in other rendering modes so the function will throw a warning
+        # FIXME: This needs to be fixed in the future when we unify the UI functionalities even for
+        # non-rendering modes.
+        if self.sim.render_mode >= self.sim.RenderMode.PARTIAL_RENDERING:
+            self.viewport_camera_controller = ParkourViewportCameraController(self, self.cfg.viewer)
+        else:
+            self.viewport_camera_controller = None
 
         # extend UI elements
         # we need to do this here after all the managers are initialized

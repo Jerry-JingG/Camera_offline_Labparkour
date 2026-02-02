@@ -42,7 +42,8 @@ if PARKOUR_TASKS_ROOT not in sys.path:
     sys.path.insert(0, PARKOUR_TASKS_ROOT)
 
 # === Import aggregator and student policy (same directory) ===
-from train_student_from_dataset import SequenceAggregator, MultiModalStudentPolicy
+from train_student_from_dataset import SequenceAggregator, MultiModalStudentPolicy, TransformerXLTemporal
+from utils.dropout_manager import CameraDropoutManager
 
 
 # ====== Isaac Lab / task loading (same as collect.py) ======
@@ -119,7 +120,7 @@ def parse_args():
     p.add_argument("--num_iters", type=int, default=2000)
 
     p.add_argument("--sequence_length", type=int, default=64)
-    p.add_argument("--prop_hist_len", type=int, default=3)
+    p.add_argument("--prop_hist_len", type=int, default=1)
     p.add_argument("--depth_hist_len", type=int, default=4)
     p.add_argument(
         "--num_pretrain_iters",
@@ -156,6 +157,14 @@ def parse_args():
     p.add_argument("--grad_clip", type=float, default=1.0)
 
     p.add_argument("--save_dir", type=str, default="student_dagger_outputs")
+
+    # Camera dropout for student (simulates camera blackout)
+    p.add_argument(
+        "--camera_dropout_prob",
+        type=float,
+        default=0.0,
+        help="Probability of camera being offline for student (0.0=disabled). Teacher always sees clean depth.",
+    )
 
     # 追加 RSL-RL 相关参数（resume / logger 等），保持与 train.py 一致的 CLI 行为
     try:
@@ -263,6 +272,17 @@ def main():
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    # Camera dropout manager: applies dropout to student's depth only
+    dropout_manager = None
+    if args.camera_dropout_prob > 0:
+        dropout_manager = CameraDropoutManager(
+            num_envs=args.num_envs,
+            device=device,
+            dt=vec_env.unwrapped.step_dt,
+            prob_start_offline=args.camera_dropout_prob,
+        )
+        print(f"[INFO] Camera dropout enabled with prob={args.camera_dropout_prob}")
+
     global_step = 0
     # Episode stats buffers for online logging
     ep_returns = np.zeros(args.num_envs, dtype=np.float64)
@@ -273,9 +293,9 @@ def main():
     timeout_hist = deque(maxlen=256)
     # TXL 记忆状态（按层存放），用于在线推理加速
     txl_mems = None
-    # TXL 训练记忆状态，用于 segment recurrence（跨 batch 保持记忆）
+    # 训练时的记忆状态 (Segment Recurrence)
     train_mems = None
-
+    max_ep_len = float(getattr(vec_env.unwrapped, "max_episode_length", 0.0))
     # 子地形目标信息（来自 base_parkour 事件）
     try:
         base_parkour = vec_env.unwrapped.parkour_manager.get_term("base_parkour")
@@ -283,6 +303,9 @@ def main():
     except Exception:
         base_parkour = None
         num_goals = None
+    
+    # Butter for Closed-Loop Yaw Injection - Removed as requested
+    # last_yaw_pred = np.zeros((args.num_envs, 2), dtype=np.float32)
 
     # ===== main training loop =====
     train_start_t = time.time()
@@ -307,26 +330,43 @@ def main():
             teacher_actions_cpu = teacher_actions.cpu()
             teacher_actions_np = teacher_actions_cpu.numpy()
 
+            # --- Mask Proprioception & Closed-Loop Injection (Removed as requested) ---
+            obs_prop_np_masked = obs_prop_np.copy()
+            
             # --- student acting ---
             # build student input from its own histories (aggregator stores them)
-            prop_batch = []
-            depth_batch = []
-            for i in range(args.num_envs):
-                prop_hist = list(aggregator.prop_history[i])
-                depth_hist = list(aggregator.depth_history[i])
-                # 将当前观测加入历史，避免“落后一拍”
-                prop_hist_plus = (prop_hist + [obs_prop_np[i]])[-aggregator.prop_hist_len :]
-                depth_hist_plus = (depth_hist + [depth_np[i]])[-aggregator.depth_hist_len :]
-                prop_batch.append(np.concatenate(prop_hist_plus, axis=0))  # [prop_hist_len * num_prop]
-                depth_batch.append(np.stack(depth_hist_plus, axis=0))      # [depth_hist_len, H, W]
+            # aggregator.prop_history: [N, H, D], contains steps [t-H, ..., t-1]
+            # We want [N, H, D] containing [t-H+1, ..., t]
+            
+            # Efficient Vectorized Construction
+            # Proprio: shift left and append current
+            curr_prop_hist = aggregator.prop_history.copy()
+            curr_prop_hist = np.roll(curr_prop_hist, -1, axis=1)
+            # Apply masking to the student's current observation input
+            curr_prop_hist[:, -1, :] = obs_prop_np_masked
+            
+            # Depth: apply dropout for student only
+            curr_depth_hist = aggregator.depth_history.copy()
+            curr_depth_hist = np.roll(curr_depth_hist, -1, axis=1)
+            # Apply camera dropout to student's current depth frame
+            depth_for_student = depth_np.copy()
+            if dropout_manager is not None:
+                depth_t_tmp = torch.from_numpy(depth_for_student).float().to(device)
+                depth_t_tmp = dropout_manager.update(depth_t_tmp)
+                depth_for_student = depth_t_tmp.cpu().numpy()
+            curr_depth_hist[:, -1, :, :] = depth_for_student
 
-            prop_step = torch.from_numpy(np.stack(prop_batch)).float().to(device)
-            depth_step = torch.from_numpy(np.stack(depth_batch)).float().to(device)
+            # Flatten Proprio: [N, H, D] -> [N, H*D]
+            prop_flat = curr_prop_hist.reshape(args.num_envs, -1)
+            
+            prop_step = torch.from_numpy(prop_flat).float().to(device)
+            depth_step = torch.from_numpy(curr_depth_hist).float().to(device)
 
             # TXL 单步推理：使用记忆状态 txl_mems
             student.eval()
             with torch.no_grad():
-                actions_step, new_mems = student.forward_step(prop_step, depth_step, mems=txl_mems)
+                # Student prediction (yaw_pred_step removed)
+                actions_step, _, new_mems = student.forward_step(prop_step, depth_step, mems=txl_mems)
                 student_act = actions_step.cpu()
 
             # 在环境 step 前缓存当前的 goal 索引（否则 step 内部 reset 后 cur_goal_idx 会被清零）
@@ -335,7 +375,7 @@ def main():
             else:
                 goal_idx_before_step = None
 
-            # --- env step (student acts) ---
+            # --- env step (student acts / teacher acts) ---
             # 预热阶段：由 Teacher 推进环境；之后由 Student 推进（可选 mixture）
             if it < args.num_pretrain_iters:
                 act_to_env = teacher_actions_cpu
@@ -382,6 +422,10 @@ def main():
                 ep_lengths[done_indices] = 0
                 episodes_this_iter += len(done_indices)
 
+                # Reset dropout state for done environments
+                if dropout_manager is not None:
+                    dropout_manager.reset_env(torch.from_numpy(dones_np).to(device))
+
             # 更新 TXL 记忆：对已经 done 的环境清零对应的 memory
             if new_mems is not None:
                 done_mask = torch.from_numpy(dones_np).to(device)
@@ -405,28 +449,32 @@ def main():
         proprio_t = torch.from_numpy(batch["proprio"]).float().to(device)
         depth_t = torch.from_numpy(batch["depth"]).float().to(device)
         teacher_t = torch.from_numpy(batch["actions"]).float().to(device)
-        dones_batch = batch["dones"]  # [B, S] numpy boolean
 
-        # 训练阶段：使用 segment recurrence，传入上一段的 mems（已 detach）
-        # Detach previous segment's mems to stop gradient backprop
-        detached_mems = None
-        if train_mems is not None:
-            detached_mems = [m.detach() for m in train_mems]
+        # 训练阶段：按完整序列前向，与离线监督训练保持一致
+        # 使用 Segment Recurrence: 传入上一段的 train_mems
+        pred, yaw_pred, new_train_mems = student.forward_with_mems(proprio_t, depth_t, mems=train_mems)
         
-        pred, new_train_mems = student.forward_with_mems(proprio_t, depth_t, mems=detached_mems)
+        # Detach memory for next segment to stop gradient backprop through segments
+        train_mems = TransformerXLTemporal.detach_mems(new_train_mems)
+
+        # Handle Done: 如果某环境在此段序列中经历了 done，则将其 memory 重置
+        # batch["dones"]: [B, S]
+        # 只要序列中有任意 step 为 done，下一段就无法简单接续上一段的 memory (保守策略：全清)
+        # 或者更精细地：如果最后一个 step 是 done，肯定清；如果在中间 done，TransformerXL 已经混淆了前后 episode，
+        # 还是清了比较安全，或者依赖 mask (但 TXL 实现里 mask 只管 attention)。
+        # 这里采用：只要有 done，就清空该 env 的 memory。
+        any_done = torch.from_numpy(batch["dones"]).any(dim=1).to(device)  # [B]
+        if any_done.any():
+            for l_idx in range(len(train_mems)):
+                if train_mems[l_idx] is not None:
+                    # 使用非原地操作，避免修改 graph 中引用的 underlying storage
+                    mask = any_done.view(-1, 1, 1)
+                    train_mems[l_idx] = torch.where(mask, torch.zeros_like(train_mems[l_idx]), train_mems[l_idx])
+
+        loss_actions = nn.functional.mse_loss(pred, teacher_t)
         
-        # 处理 done 环境：重置其 mems
-        # 如果该环境在此序列中有任何 done，则清零其 mems
-        any_done = dones_batch.any(axis=1)  # [B]
-        if new_train_mems is not None and any_done.any():
-            done_mask = torch.from_numpy(any_done).to(device)
-            for layer_mem in new_train_mems:
-                if layer_mem is not None and layer_mem.numel() > 0:
-                    layer_mem[done_mask] = 0.0
-        
-        train_mems = new_train_mems  # 保存给下一个 segment
-        
-        loss = nn.functional.mse_loss(pred, teacher_t)
+        loss = loss_actions
+
         # 监控标签与残差的幅值，便于判断 loss 量级
         with torch.no_grad():
             teacher_rms = torch.sqrt(torch.mean(teacher_t ** 2)).item()
@@ -459,6 +507,7 @@ def main():
         if use_wandb:
             wandb_metrics = {
                 "train/loss": loss.item(),
+                "train/loss_actions": loss_actions.item(),
                 "time/iter_s": iter_time,
                 "time/eta_s": eta_seconds,
                 "time/elapsed_s": elapsed,
@@ -489,6 +538,17 @@ def main():
             if len(timeout_hist) > 0:
                 timeout_rate = float(np.mean(timeout_hist))
                 wandb_metrics["rollout/timeout_rate"] = timeout_rate
+            
+            # --- New Metric: Terrain Level ---
+            if base_parkour is not None:
+                # base_parkour.terrain is the ParkourTerrainImporter which holds terrain_levels
+                avg_level = float(base_parkour.terrain.terrain_levels.float().mean().item())
+                wandb_metrics["rollout/terrain_level_mean"] = avg_level
+
+            # Camera dropout stats
+            if dropout_manager is not None:
+                wandb_metrics["camera/offline_ratio"] = dropout_manager.offline_state.float().mean().item()
+
             wandb.log(wandb_metrics, step=global_step)
 
         # save

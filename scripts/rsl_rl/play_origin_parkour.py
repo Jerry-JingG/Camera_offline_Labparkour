@@ -29,6 +29,7 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument("--free_cam", action="store_true", default=False, help="Disable follow camera for free-look.")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -76,6 +77,15 @@ def main():
     env_cfg = parse_env_cfg(
         args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs, use_fabric=not args_cli.disable_fabric
     )
+    # 临时绕过 delta_yaw_ok 观测组，避免空 shape 触发 ObservationManager 维度拼接报错
+    if hasattr(env_cfg.observations, "delta_yaw_ok"):
+        env_cfg.observations.delta_yaw_ok = None
+    
+    if args_cli.free_cam:
+        env_cfg.viewer.asset_name = None
+        env_cfg.viewer.origin_type = "world"
+        print("[INFO] Free camera enabled. Follow camera disabled.")
+
     agent_cfg: ParkourRslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
 
     # specify directory for logging experiments
