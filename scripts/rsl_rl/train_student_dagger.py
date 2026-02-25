@@ -319,8 +319,8 @@ def main():
             dt=vec_env.unwrapped.step_dt,
             prob_start_offline=0.0,
             prob_cam_offline=0.5,
-            online_duration_range=(2.0, 20.0),
-            offline_duration_range=(1.0, 10.0)
+            online_duration_range=(2.0, 10.0),
+            offline_duration_range=(1.0, 5.0)
         )
 
     # 6. DAgger Loop
@@ -364,6 +364,7 @@ def main():
             # C. Dropout
             # Create copies for student (augmented) vs teacher (clean)
             student_prop = obs[:, :proprio_dim].clone()
+            # student_prop[:, 7] = 0
             student_prop[:, 12] = dones_bool.float()
             student_depth = depth_image.clone()
 

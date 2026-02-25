@@ -334,6 +334,7 @@ def main() -> None:
         if depth_image is None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
         obs_prop = obs[:, :proprio_dim]
+        obs_prop[:, 7] = 0
         obs_prop[:, 12] = dones_bool.float()
 
         if dropout_manager:

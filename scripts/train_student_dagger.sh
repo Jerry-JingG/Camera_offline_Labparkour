@@ -9,7 +9,7 @@ set -euo pipefail
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ------------------------------- 核心训练参数 ---------------------------------
-TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-v0"  # --task
+TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Collect-v0"  # --task
 NUM_ENVS=64                                                 # --num_envs：并行环境数量
 NUM_ITERS=50000                                              # --num_iters：DAGGER 总迭代次数
 NUM_PRETRAIN_ITERS=1000                                      # --num_pretrain_iters：预热迭代，前若干迭代由 Teacher 全程驾驶
@@ -18,9 +18,9 @@ SEQUENCE_LENGTH=128                                          # --sequence_length
 PROP_HIST_LEN=1                                             # --prop_hist_len：ProprioEncoder 的历史步数
 DEPTH_HIST_LEN=1                                            # --depth_hist_len：DepthEncoder 的帧堆叠数
 
-TEACHER_CHECKPOINT="logs/rsl_rl/unitree_go2_parkour/251230_ckpt/model_49999.pt"    # 教师 PPO 权重路径
+TEACHER_CHECKPOINT="logs/rsl_rl/unitree_go2_parkour/2026-01-28_22-35-55_try2/model_74000.pt"    # 教师 PPO 权重路径
 STUDENT_CHECKPOINT=""                                           # 可选：已有学生模型 checkpoint
-SAVE_DIR="outputs/students/trainxl_from_dataset/dagger0121"          # 输出目录
+SAVE_DIR="outputs/students/trainxl_from_dataset/dagger0219"          # 输出目录
 
 LEARNING_RATE=3e-4                                              # --learning_rate
 WEIGHT_DECAY=1e-4                                               # --weight_decay
@@ -40,7 +40,7 @@ USE_DROPOUT=true
 # ------------------------------- 日志 / W&B 参数 -------------------------------
 USE_WANDB=true                                                 # --wandb：是否开启 W&B
 WANDB_PROJECT="camera-offline-parkour"                          # --wandb_project
-WANDB_RUN_NAME="dagger-txl-dropout-0121"                        # --wandb_run_name
+WANDB_RUN_NAME="dagger-txl-dropout-0219"                        # --wandb_run_name
 
 # --------------------------- AppLauncher / Isaac 参数 -------------------------
 DEVICE_ARG="cuda:0"                                             # --device

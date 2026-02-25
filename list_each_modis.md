@@ -57,3 +57,9 @@ dropout_manager添加了相机和感知的混合掉线。效果一般
 
 commit13:
 merge了dagger训练逻辑。额外修改了train batch时的mem处理，已修改为: 该sequence中只要有done的步骤, 那么在最后一个done的步骤之前的所有mem被清空
+
+commit14:
+添加了教师模型的雷达观测，现在教师模型在通过beam地形时可以提前趴下了，学生模型也能学到这一点
+
+commit15：
+暂定了训练超参数：使用collect环境训练，num_pretrain_iters和deta_dacay_iters不变，训练时delta_next_yaw不置零而在play时置零，相机max distance仍为2

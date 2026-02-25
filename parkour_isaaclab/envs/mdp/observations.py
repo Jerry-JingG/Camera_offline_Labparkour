@@ -72,8 +72,8 @@ class ExtremeParkourObservations(ManagerTermBase):
                             0*self.delta_yaw[:, None],   #[1,1] 5
                             self.delta_yaw[:, None], #[1,1] 6
                             self.delta_next_yaw[:, None], #[1,1] 7 
-                            0*commands[:, 0:2], #[1,2] 8 
-                            commands[:, 0:1],  #[1,1] 9
+                            0*commands[:, 0:2], #[1,2] 8-9
+                            commands[:, 0:1],  #[1,1] 10
                             env_idx_tensor,
                             invert_env_idx_tensor,
                             self.asset.data.joint_pos - self.asset.data.default_joint_pos,

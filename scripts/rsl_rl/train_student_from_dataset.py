@@ -372,10 +372,10 @@ class MultiModalStudentPolicy(nn.Module):
         batch_size, seq_len, feat_dim = proprio_seq.shape
         prop_encoded = self.proprio_encoder(
             proprio_seq.reshape(batch_size * seq_len, feat_dim)
-        )  # [B*S, 1, C]
+        )  # [B*S, prop_hist_len*proprio_dim]
         depth_encoded = self.depth_encoder(
             depth_seq.reshape(batch_size * seq_len, depth_seq.size(2), depth_seq.size(3), depth_seq.size(4))
-        )  # [B*S, T, C]
+        )  # [B*S, depth_hist_len, H, W]
         fused = self.fusion_transformer(prop_encoded, depth_encoded)
         fused_seq = fused["all_pooled"].reshape(batch_size, seq_len, -1)
 

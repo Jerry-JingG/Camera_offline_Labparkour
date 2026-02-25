@@ -1,6 +1,6 @@
 from isaaclab.utils import configclass
 from ..parkour_terrain_generator_cfg import ParkourSubTerrainBaseCfg
-from . import extreme_parkour_terrians
+from . import extreme_parkour_terrains
 
 @configclass
 class ExtremeParkourRoughTerrainCfg(ParkourSubTerrainBaseCfg):
@@ -17,24 +17,24 @@ class ExtremeParkourRoughTerrainCfg(ParkourSubTerrainBaseCfg):
 
 @configclass
 class ExtremeParkourGapTerrainCfg(ExtremeParkourRoughTerrainCfg):
-    function = extreme_parkour_terrians.parkour_gap_terrain
+    function = extreme_parkour_terrains.parkour_gap_terrain
     gap_size: str = '0.1 + 0.7*difficulty'
     gap_depth: tuple[float, float] = (0.2, 1) 
 
 @configclass
 class ExtremeParkourHurdleTerrainCfg(ExtremeParkourRoughTerrainCfg):
-    function = extreme_parkour_terrians.parkour_hurdle_terrain
+    function = extreme_parkour_terrains.parkour_hurdle_terrain
     stone_len: str = '0.1 + 0.3 * difficulty'
     hurdle_height_range: str = '0.1 + 0.1 * difficulty, 0.15 + 0.15 * difficulty'
 
 @configclass
 class ExtremeParkourStepTerrainCfg(ExtremeParkourRoughTerrainCfg):
-    function = extreme_parkour_terrians.parkour_step_terrain
+    function = extreme_parkour_terrains.parkour_step_terrain
     step_height: str = '0.1 + 0.35*difficulty'
 
 @configclass
 class ExtremeParkourBeamTerrainCfg(ExtremeParkourRoughTerrainCfg):
-    function = extreme_parkour_terrians.parkour_beam_terrain
+    function = extreme_parkour_terrains.parkour_beam_terrain
     beam_length: str = '0.3 + 0.3 * difficulty'
     beam_height_range: str = '0.35 - 0.15 * difficulty, 0.45 - 0.15 * difficulty'
     beam_depth: float = 0.2  # Thickness of the beam
@@ -42,7 +42,7 @@ class ExtremeParkourBeamTerrainCfg(ExtremeParkourRoughTerrainCfg):
 
 @configclass
 class ExtremeParkourTerrainCfg(ExtremeParkourRoughTerrainCfg):
-    function = extreme_parkour_terrians.parkour_terrain
+    function = extreme_parkour_terrains.parkour_terrain
     pit_depth: tuple[float, float] = (0.2, 1)
     stone_width: float = 1.0
     last_stone_len: float =1.6
@@ -54,4 +54,4 @@ class ExtremeParkourTerrainCfg(ExtremeParkourRoughTerrainCfg):
 
 @configclass
 class ExtremeParkourDemoTerrainCfg(ExtremeParkourRoughTerrainCfg):
-    function = extreme_parkour_terrians.parkour_demo_terrain
+    function = extreme_parkour_terrains.parkour_demo_terrain
