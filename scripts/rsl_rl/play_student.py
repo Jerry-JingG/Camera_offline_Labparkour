@@ -1,7 +1,9 @@
 """
-Stateful (TransformerXL Memory-Based) Inference Script - Optimized Vectorized Version
+运行示例:
+python scripts/rsl_rl/play_student.py --task Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Play-v0//
+--student_checkpoint path_to_your_txl_student.pt --device cuda:0 --num_envs 8//
+--mem_len 128 --prop_hist_len 1 --depth_hist_len 1 --headless (--use_dropout)
 """
-
 from __future__ import annotations
 
 import argparse
@@ -242,8 +244,6 @@ def main() -> None:
     args = parse_args_play()
     headless = getattr(args, "headless", False)
     disable_fabric = getattr(args, "disable_fabric", False)
-    if not headless:
-        args.enable_cameras = True
 
     app_launcher = AppLauncher(args)
     simulation_app = app_launcher.app
@@ -334,7 +334,6 @@ def main() -> None:
         if depth_image is None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
         obs_prop = obs[:, :proprio_dim]
-        obs_prop[:, 7] = 0
         obs_prop[:, 12] = dones_bool.float()
 
         if dropout_manager:

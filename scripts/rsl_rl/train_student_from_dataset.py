@@ -141,6 +141,7 @@ class SequenceAggregator:
 
         # --- 3. 处理 Done (批量清零) ---
         if done_t.any():
+            """ 对于done掉的环境, 不能将它们的seq_buffer置0,因为transformer网络在训练时是sequencely output的!!! """
             self.prop_histories[done_t] = 0.0
             self.depth_histories[done_t] = 0.0
 
@@ -744,8 +745,8 @@ def train_batch(
     如果一个 Episode 在序列中间结束，在这个结束点之前的所有 Memory 对于下一个 Batch 来说都是污染数据，必须全部清除，而不仅仅是检查最后一步。
     """
     if new_mems is not None:
-        # dones shape: [Batch, Seq_Len]
-        # new_mems shape: List of [Batch, Mem_Len, D_Model]
+        # dones shape: [num_envs, Seq_Len]
+        # new_mems shape: [num_layers, num_envs, Mem_Len, D_Model]
         batch_size = dones.shape[0]
 
         for b in range(batch_size):
@@ -754,12 +755,12 @@ def train_batch(
 
             if done_indices.numel() > 0:
                 # 找到最后一个 done 的索引
-                last_done_pos = done_indices.max().item()
+                last_done_idx = done_indices.max().item()
 
                 # 清空该位置及之前的记忆
-                # 下一个 Batch 将从 last_done_pos + 1 的上下文开始继续
+                # 下一个 Batch 将从 last_done_idx + 1 的上下文开始继续
                 for layer_mem in new_mems:
-                    layer_mem[b, :last_done_pos + 1, :] = 0.0
+                    layer_mem[b, :last_done_idx + 1, :] = 0.0
 
     metrics = {
         "loss": float(loss.item()),

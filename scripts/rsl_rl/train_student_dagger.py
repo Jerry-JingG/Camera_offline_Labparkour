@@ -364,7 +364,6 @@ def main():
             # C. Dropout
             # Create copies for student (augmented) vs teacher (clean)
             student_prop = obs[:, :proprio_dim].clone()
-            # student_prop[:, 7] = 0
             student_prop[:, 12] = dones_bool.float()
             student_depth = depth_image.clone()
 
@@ -456,7 +455,7 @@ def main():
 
         # Update train_mems for next iteration
         if new_train_mems is not None:
-            # mem is list of [Batch, Mem_Len, D_Model], do Truncated BPTT
+            # shape of mems is [num_layers, num_envs, Mem_Len, D_Model], do Truncated BPTT
             train_mems = TransformerXLTemporal.detach_mems(new_train_mems)
             batch_size = b_dones.shape[0]
 
@@ -468,16 +467,14 @@ def main():
 
                 if done_indices.numel() > 0:
                     # 找到该序列中 *最后一个* done 的位置
-                    last_done_pos = done_indices.max().item()
-
+                    last_done_idx = done_indices.max().item()
                     # 核心修正逻辑:
-                    # 如果在索引 t 处结束了 Episode，那么 t 以及 t 之前的所有 Memory
-                    # 都是属于旧 Episode 的。
+                    # 如果在第t步结束了Episode，那么t及t之前的所有Memory都属于旧Episode。
                     # 下一个 Batch (从 t+1 或 S+1 开始) 不应该看到这些信息。
-                    # 因此将 [0, last_done_pos] 闭区间的内存清零。
+                    # 因此将 [0, last_done_idx] 闭区间的mem清零。
                     for layer_mem in train_mems:
                         # layer_mem shape: [Batch, Mem_Len, D_Model]
-                        layer_mem[b, :last_done_pos + 1, :] = 0.0
+                        layer_mem[b, :last_done_idx + 1, :] = 0.0
 
         else:
             train_mems = None
