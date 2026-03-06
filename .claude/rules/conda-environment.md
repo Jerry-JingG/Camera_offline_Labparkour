@@ -7,7 +7,7 @@
 ### Activation Command
 
 ```bash
-conda activate parkour
+source /home/droplet/anaconda3/etc/profile.d/conda.sh && conda activate parkour
 ```
 
 ### When to Activate
@@ -25,13 +25,16 @@ Always chain conda activation with your command:
 
 ```bash
 # CORRECT: Activate first
-conda activate parkour && python script.py
+source /home/droplet/anaconda3/etc/profile.d/conda.sh && conda activate parkour && python script.py
 
 # CORRECT: For multiple commands
-conda activate parkour && pip install package && python script.py
+source /home/droplet/anaconda3/etc/profile.d/conda.sh && conda activate parkour && pip install package && python script.py
 
 # WRONG: Running without activation
 python script.py
+
+# WRONG: Missing conda.sh source
+conda activate parkour && python script.py
 ```
 
 ### Verification
@@ -39,7 +42,7 @@ python script.py
 After activation, verify the environment:
 
 ```bash
-conda activate parkour && which python
+source /home/droplet/anaconda3/etc/profile.d/conda.sh && conda activate parkour && which python
 ```
 
 Should show Python from the `parkour` environment, not system Python.

@@ -37,7 +37,7 @@ class StudentActorCritic(nn.Module):
         self,
         student_policy: nn.Module,
         value_hidden_dims: Tuple[int, ...] = (256, 256),
-        init_noise_std: float = 1.0,
+        init_noise_std: float = 0.5,  # 平衡探索和稳定性，避免熵为负数
         freeze_encoders: bool = False,
         freeze_fusion: bool = False,
         freeze_temporal: bool = False,
@@ -136,8 +136,9 @@ class StudentActorCritic(nn.Module):
             action_mean: Action mean from policy [B, action_dim].
             new_mems: Updated memory tensors.
         """
-        # Use policy's forward_step which returns (action_mean, yaw_pred, new_mems)
-        action_mean, _, new_mems = self.student_policy.forward_step(
+        # Use policy's forward_step which returns (action_mean, new_mems)
+        # Note: yaw_pred was removed from the return values
+        action_mean, new_mems = self.student_policy.forward_step(
             proprio, depth, mems=mems
         )
 

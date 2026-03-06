@@ -34,6 +34,13 @@ except ImportError:
     WANDB_AVAILABLE = False
     print("[warning] wandb not installed. Run `pip install wandb` to enable logging.")
 
+# 确保 scripts/rsl_rl 目录在 sys.path 最前面，避免与 parkour_isaaclab/utils.py 冲突
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path or sys.path.index(_SCRIPT_DIR) > 0:
+    if _SCRIPT_DIR in sys.path:
+        sys.path.remove(_SCRIPT_DIR)
+    sys.path.insert(0, _SCRIPT_DIR)
+
 from utils.dropout_manager import CameraDropoutManager
 
 # Ensure repo roots are importable
@@ -710,45 +717,19 @@ def run_training() -> None:
         avg_loss = running_loss / max(1, num_updates)
         print(f"[epoch {epoch}] completed in {epoch_time:.1f}s | avg_loss={avg_loss:.6f}")
 
-            epoch_time = time.time() - epoch_start
-            
-            # Compute epoch-level statistics
-            epoch_loss_mean = np.mean(epoch_losses) if epoch_losses else 0.0
-            epoch_loss_std = np.std(epoch_losses) if epoch_losses else 0.0
-            epoch_loss_min = np.min(epoch_losses) if epoch_losses else 0.0
-            epoch_loss_max = np.max(epoch_losses) if epoch_losses else 0.0
-            
-            print(f"[epoch {epoch}] completed in {epoch_time:.1f}s | avg_loss={epoch_loss_mean:.6f}")
+        # Save checkpoint every 100 epochs
+        if epoch % 100 == 99:
+            ckpt_path = save_dir / f"student_epoch_{epoch:04d}.pt"
+            save_checkpoint(ckpt_path, model, optimizer, epoch + 1, global_step, streamer.meta)
 
-            # Log epoch-level metrics to wandb
+            # Log checkpoint to wandb
             if use_wandb:
-                wandb.log({
-                    # epoch/ summary metrics
-                    "epoch/loss_mean": epoch_loss_mean,
-                    "epoch/loss_std": epoch_loss_std,
-                    "epoch/loss_min": epoch_loss_min,
-                    "epoch/loss_max": epoch_loss_max,
-                    "epoch/diff_rmse_mean": np.mean(epoch_diff_rmses) if epoch_diff_rmses else 0.0,
-                    "epoch/rel_rmse_mean": np.mean(epoch_rel_rmses) if epoch_rel_rmses else 0.0,
-                    "epoch/grad_norm_mean": np.mean(epoch_grad_norms) if epoch_grad_norms else 0.0,
-                    "epoch/duration_s": epoch_time,
-                    "epoch/sequences_total": epoch_sequences,
-                    "epoch/sequences_per_sec": epoch_sequences / max(epoch_time, 1e-6),
-                }, step=global_step)
+                wandb.save(str(ckpt_path))
 
-            if epoch % 100 == 99:
-                ckpt_path = save_dir / f"student_epoch_{epoch:04d}.pt"
-                save_checkpoint(ckpt_path, model, optimizer, epoch + 1, global_step, streamer.meta)
-                
-                # Log checkpoint to wandb
-                if use_wandb:
-                    wandb.save(str(ckpt_path))
-
-    finally:
-        # Ensure wandb is properly closed
-        if use_wandb:
-            wandb.finish()
-            print("[wandb] Run finished.")
+    # Ensure wandb is properly closed
+    if use_wandb:
+        wandb.finish()
+        print("[wandb] Run finished.")
 
 
 def train_batch(

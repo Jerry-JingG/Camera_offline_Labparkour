@@ -31,9 +31,10 @@ from torch import Tensor, nn
 # 确保项目路径可导入
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "rsl_rl"))
-sys.path.insert(0, str(PROJECT_ROOT / "parkour_tasks"))
 sys.path.insert(0, str(PROJECT_ROOT / "parkour_isaaclab"))
+sys.path.insert(0, str(PROJECT_ROOT / "parkour_tasks"))
+# 确保 scripts/rsl_rl 在最前面，避免与 parkour_isaaclab/utils.py 冲突
+sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "rsl_rl"))
 
 # 导入核心模块
 from modules.student_actor_critic import StudentActorCritic
@@ -154,18 +155,18 @@ class TrainingConfig:
     save_interval: int = 100
     log_interval: int = 10
 
-    # PPO 超参数
-    learning_rate: float = 1e-4
-    clip_param: float = 0.2
+    # PPO 超参数（针对 DAgger 模型微调优化）
+    learning_rate: float = 3e-5  # 降低学习率，避免破坏预训练权重
+    clip_param: float = 0.1  # 更保守的 clip，限制策略更新幅度
     gamma: float = 0.99
     lam: float = 0.95
-    entropy_coef: float = 0.01
+    entropy_coef: float = 0.001  # 降低熵系数，避免鼓励增加噪声
     value_loss_coef: float = 0.5
-    max_grad_norm: float = 1.0
-    num_learning_epochs: int = 5
+    max_grad_norm: float = 0.5  # 更严格的梯度裁剪
+    num_learning_epochs: int = 3  # 减少 epoch 数，避免过度更新
     num_mini_batches: int = 4
     schedule: str = "adaptive"
-    desired_kl: float = 0.01
+    desired_kl: float = 0.01  # 单维度平均 KL 目标，与原生 PPO 一致
 
     # 编码器冻结策略
     freeze_proprio_encoder: bool = False
@@ -191,12 +192,9 @@ class TrainingConfig:
     # 设备
     device: str = "cuda"
 
-    # wandb 配置
-    use_wandb: bool = False
-    wandb_project: str = "student-rl-finetune"
-    wandb_entity: Optional[str] = None
-    wandb_run_name: Optional[str] = None
-    wandb_tags: Optional[List[str]] = None
+    # TensorBoard 配置（替代 wandb）
+    use_tensorboard: bool = True
+    tensorboard_flush_secs: int = 10
 
     def validate(self) -> None:
         """验证配置参数"""
@@ -366,163 +364,136 @@ def create_domain_randomization(
 
 
 # ============================================================
-# wandb 集成
+# TensorBoard 集成（替代 wandb）
 # ============================================================
 
-# 检查 wandb 是否可用
-try:
-    import wandb
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
-    print("[WARNING] wandb not installed. Run `pip install wandb` to enable logging.")
+# 导入 TensorBoard 日志工具
+from utils.tensorboard_logger import TensorBoardLogger
 
 
-def init_wandb(
+def init_tensorboard(
     config: TrainingConfig,
     checkpoint_meta: Dict[str, Any],
-    resume_run_id: Optional[str] = None,
-) -> Optional[Any]:
-    """初始化 wandb
+    run_dir: Path,
+) -> Optional[TensorBoardLogger]:
+    """初始化 TensorBoard 日志器
 
     Args:
         config: 训练配置
         checkpoint_meta: checkpoint 元数据
-        resume_run_id: 恢复训练时的 run ID
+        run_dir: 运行目录
 
     Returns:
-        wandb run 对象，如果未启用则返回 None
+        TensorBoardLogger 对象，如果未启用则返回 None
     """
-    if not config.use_wandb:
+    if not config.use_tensorboard:
         return None
 
-    if not WANDB_AVAILABLE:
-        print("[WARNING] wandb requested but not installed. Skipping wandb logging.")
+    try:
+        # TensorBoard 日志目录
+        tb_log_dir = run_dir / "tensorboard"
+
+        # 初始化日志器
+        logger = TensorBoardLogger(
+            log_dir=str(tb_log_dir),
+            flush_secs=config.tensorboard_flush_secs,
+        )
+
+        # 记录配置
+        tb_config = {
+            # 训练配置
+            "num_envs": config.num_envs,
+            "num_steps_per_env": config.num_steps_per_env,
+            "max_iterations": config.max_iterations,
+
+            # PPO 超参数
+            "learning_rate": config.learning_rate,
+            "clip_param": config.clip_param,
+            "gamma": config.gamma,
+            "lam": config.lam,
+            "entropy_coef": config.entropy_coef,
+            "value_loss_coef": config.value_loss_coef,
+            "max_grad_norm": config.max_grad_norm,
+            "num_learning_epochs": config.num_learning_epochs,
+            "num_mini_batches": config.num_mini_batches,
+            "schedule": config.schedule,
+            "desired_kl": config.desired_kl,
+
+            # 编码器冻结
+            "freeze_proprio_encoder": config.freeze_proprio_encoder,
+            "freeze_depth_encoder": config.freeze_depth_encoder,
+            "freeze_fusion_transformer": config.freeze_fusion_transformer,
+            "freeze_temporal_transformer": config.freeze_temporal_transformer,
+
+            # Domain Randomization
+            "domain_rand_enabled": config.domain_rand_enabled,
+            "domain_rand_curriculum": config.domain_rand_curriculum,
+
+            # 模型配置（从 checkpoint 元数据）
+            "proprio_dim": checkpoint_meta.get("num_prop", config.proprio_dim),
+            "action_dim": checkpoint_meta.get("action_dim", config.action_dim),
+            "depth_shape": config.depth_shape,
+            "token_dim": config.token_dim,
+
+            # 路径
+            "dagger_checkpoint": config.dagger_checkpoint,
+        }
+        logger.log_config(tb_config)
+
+        return logger
+    except Exception as e:
+        print(f"[tensorboard] Warning: Failed to initialize TensorBoard: {e}")
+        print("[tensorboard] Training will continue without TensorBoard logging")
         return None
-
-    # 构建 wandb 配置
-    wandb_config = {
-        # 训练配置
-        "num_envs": config.num_envs,
-        "num_steps_per_env": config.num_steps_per_env,
-        "max_iterations": config.max_iterations,
-
-        # PPO 超参数
-        "learning_rate": config.learning_rate,
-        "clip_param": config.clip_param,
-        "gamma": config.gamma,
-        "lam": config.lam,
-        "entropy_coef": config.entropy_coef,
-        "value_loss_coef": config.value_loss_coef,
-        "max_grad_norm": config.max_grad_norm,
-        "num_learning_epochs": config.num_learning_epochs,
-        "num_mini_batches": config.num_mini_batches,
-        "schedule": config.schedule,
-        "desired_kl": config.desired_kl,
-
-        # 编码器冻结
-        "freeze_proprio_encoder": config.freeze_proprio_encoder,
-        "freeze_depth_encoder": config.freeze_depth_encoder,
-        "freeze_fusion_transformer": config.freeze_fusion_transformer,
-        "freeze_temporal_transformer": config.freeze_temporal_transformer,
-
-        # Domain Randomization
-        "domain_rand_enabled": config.domain_rand_enabled,
-        "domain_rand_curriculum": config.domain_rand_curriculum,
-
-        # 模型配置（从 checkpoint 元数据）
-        "proprio_dim": checkpoint_meta.get("num_prop", config.proprio_dim),
-        "action_dim": checkpoint_meta.get("action_dim", config.action_dim),
-        "depth_shape": config.depth_shape,
-        "token_dim": config.token_dim,
-
-        # 路径
-        "dagger_checkpoint": config.dagger_checkpoint,
-    }
-
-    # 初始化 wandb
-    run = wandb.init(
-        project=config.wandb_project,
-        entity=config.wandb_entity,
-        name=config.wandb_run_name,
-        tags=config.wandb_tags,
-        config=wandb_config,
-        resume="allow" if resume_run_id else None,
-        id=resume_run_id,
-    )
-
-    print(f"[wandb] Initialized: project={config.wandb_project}, run={run.name}")
-    return run
 
 
 def log_training_metrics(
+    logger: Optional[TensorBoardLogger],
     iteration: int,
     train_info: Dict[str, float],
     domain_rand_params: Optional[Dict[str, float]] = None,
     episode_stats: Optional[Dict[str, float]] = None,
 ) -> None:
-    """记录训练指标到 wandb
+    """记录训练指标到 TensorBoard
 
     Args:
+        logger: TensorBoardLogger 对象
         iteration: 当前迭代次数
         train_info: PPO 更新返回的训练信息
         domain_rand_params: Domain Randomization 当前参数
         episode_stats: Episode 统计信息
     """
-    if not WANDB_AVAILABLE:
+    if logger is None or not logger.enabled:
         return
 
-    metrics = {
-        # PPO 损失
-        "train/value_loss": train_info.get("value_loss", 0.0),
-        "train/policy_loss": train_info.get("surrogate_loss", 0.0),
-        "train/entropy": train_info.get("entropy", 0.0),
-        "train/kl_divergence": train_info.get("kl", 0.0),
-        "train/learning_rate": train_info.get("learning_rate", 0.0),
+    try:
+        metrics = {
+            # PPO 损失
+            "train/value_loss": train_info.get("value_loss", 0.0),
+            "train/policy_loss": train_info.get("surrogate_loss", 0.0),
+            "train/entropy": train_info.get("entropy", 0.0),
+            "train/kl_divergence": train_info.get("kl", 0.0),
+            "train/learning_rate": train_info.get("learning_rate", 0.0),
 
-        # 迭代
-        "iteration": iteration,
-    }
+            # 迭代
+            "iteration": iteration,
+        }
 
-    # 添加 Domain Randomization 参数
-    if domain_rand_params:
-        for key, value in domain_rand_params.items():
-            metrics[f"domain_rand/{key}"] = value
+        # 添加 Domain Randomization 参数
+        if domain_rand_params:
+            for key, value in domain_rand_params.items():
+                metrics[f"domain_rand/{key}"] = value
 
-    # 添加 Episode 统计
-    if episode_stats:
-        for key, value in episode_stats.items():
-            metrics[f"episode/{key}"] = value
+        # 添加 Episode 统计
+        if episode_stats:
+            for key, value in episode_stats.items():
+                metrics[f"episode/{key}"] = value
 
-    wandb.log(metrics, step=iteration)
-
-
-def save_checkpoint_to_wandb(
-    checkpoint_path: Path,
-    iteration: int,
-    is_best: bool = False,
-) -> None:
-    """保存检查点到 wandb
-
-    Args:
-        checkpoint_path: 检查点文件路径
-        iteration: 当前迭代次数
-        is_best: 是否为最佳模型
-    """
-    if not WANDB_AVAILABLE:
-        return
-
-    artifact_name = f"checkpoint-iter-{iteration}"
-    if is_best:
-        artifact_name = "checkpoint-best"
-
-    artifact = wandb.Artifact(
-        name=artifact_name,
-        type="model",
-        metadata={"iteration": iteration, "is_best": is_best},
-    )
-    artifact.add_file(str(checkpoint_path))
-    wandb.log_artifact(artifact)
+        # 记录日志
+        logger.log(metrics, step=iteration)
+    except Exception as e:
+        # 记录错误但不中断训练
+        print(f"[tensorboard] Warning: Failed to log metrics: {e}")
 
 
 # ============================================================
@@ -657,7 +628,7 @@ def create_student_actor_critic(
     actor_critic = StudentActorCritic(
         student_policy=student_policy,
         value_hidden_dims=(256, 256),
-        init_noise_std=1.0,
+        init_noise_std=0.5,  # 平衡探索和稳定性，避免熵为负数
         freeze_encoders=freeze_encoders,
         freeze_fusion=freeze_fusion,
         freeze_temporal=freeze_temporal,
@@ -736,8 +707,8 @@ def collect_rollouts(
     domain_rand: Optional[DomainRandomizationWrapper],
     num_steps: int,
     num_prop: int,
-) -> Dict[str, Tensor]:
-    """收集 rollout 数据
+) -> Dict[str, Any]:
+    """收集 rollout 数据并追踪 episode 统计
 
     Args:
         env: 环境（ParkourRslRlVecEnvWrapper）
@@ -747,13 +718,30 @@ def collect_rollouts(
         num_prop: proprio 维度
 
     Returns:
-        最后一步的观测字典 {"proprio": Tensor, "depth": Tensor}
+        字典包含：
+        - "proprio": 最后一步的 proprio 观测
+        - "depth": 最后一步的 depth 观测
+        - "episode_stats": episode 统计信息
+            - "mean_return": 完成的 episode 的平均总奖励
+            - "mean_length": 完成的 episode 的平均长度
+            - "count": 完成的 episode 数量
+            - "rollout_mean_reward": rollout 期间的平均 step reward
     """
     # 获取初始观测
-    # ParkourRslRlVecEnvWrapper.get_observations() 返回 (obs, extras)
-    # obs: policy 观测 tensor
-    # extras["observations"]["depth_camera"]: 深度图像 [B, H, W]
     obs_tensor, extras = env.get_observations()
+    num_envs = obs_tensor.shape[0]
+    device = obs_tensor.device
+
+    # Episode 追踪状态
+    episode_rewards = torch.zeros(num_envs, device=device)
+    episode_lengths = torch.zeros(num_envs, device=device, dtype=torch.int)
+
+    # 完成的 episode 统计
+    completed_returns: List[float] = []
+    completed_lengths: List[int] = []
+
+    # Rollout 统计（保留原有功能）
+    step_rewards: List[float] = []
 
     for _ in range(num_steps):
         # 提取 proprio 和 depth
@@ -761,7 +749,6 @@ def collect_rollouts(
         depth = extras["observations"]["depth_camera"]
 
         # 添加 depth_hist_len 维度：[B, H, W] -> [B, 1, H, W]
-        # forward_step 期望 depth 形状为 [B, depth_hist_len, H, W]
         if depth.dim() == 3:
             depth = depth.unsqueeze(1)
 
@@ -773,18 +760,57 @@ def collect_rollouts(
         actions = ppo.act(proprio, depth)
 
         # 执行动作
-        # ParkourRslRlVecEnvWrapper.step() 返回 (obs, rewards, dones, infos)
-        # infos 包含 "observations" 键
         obs_tensor, rewards, dones, infos = env.step(actions)
 
-        # 更新 extras（从 infos 中获取新的观测）
+        # 处理 rewards 和 dones 的维度（可能是 [N] 或 [N, 1]）
+        rewards_flat = rewards.squeeze(-1) if rewards.dim() == 2 else rewards
+        dones_flat = dones.squeeze(-1) if dones.dim() == 2 else dones
+
+        # 累积 episode 奖励和长度
+        episode_rewards += rewards_flat
+        episode_lengths += 1
+
+        # Rollout 统计
+        step_rewards.append(rewards_flat.mean().item())
+
+        # 检查完成的 episode
+        done_indices = dones_flat.nonzero(as_tuple=True)[0]
+        if len(done_indices) > 0:
+            # 记录完成的 episode
+            completed_returns.extend(episode_rewards[done_indices].cpu().tolist())
+            completed_lengths.extend(episode_lengths[done_indices].cpu().tolist())
+
+            # 重置完成的 episode
+            episode_rewards[done_indices] = 0
+            episode_lengths[done_indices] = 0
+
+        # 更新 extras
         if "observations" in infos:
             extras = infos
 
-        # 处理环境步骤
+        # 处理环境步骤（PPO storage 和 TXL memory reset）
         ppo.process_env_step(rewards, dones, infos)
 
-    # 返回最后一步的观测（字典格式，供 compute_returns_and_update 使用）
+    # 计算统计
+    rollout_mean_reward = sum(step_rewards) / len(step_rewards) if step_rewards else 0.0
+
+    if completed_returns:
+        episode_stats = {
+            "mean_return": sum(completed_returns) / len(completed_returns),
+            "mean_length": sum(completed_lengths) / len(completed_lengths),
+            "count": len(completed_returns),
+            "rollout_mean_reward": rollout_mean_reward,
+        }
+    else:
+        # 没有完成的 episode（可能 episode 很长）
+        episode_stats = {
+            "mean_return": 0.0,
+            "mean_length": 0.0,
+            "count": 0,
+            "rollout_mean_reward": rollout_mean_reward,
+        }
+
+    # 返回最后一步的观测
     final_depth = extras["observations"]["depth_camera"]
     if final_depth.dim() == 3:
         final_depth = final_depth.unsqueeze(1)
@@ -792,6 +818,7 @@ def collect_rollouts(
     return {
         "proprio": obs_tensor[:, :num_prop],
         "depth": final_depth,
+        "episode_stats": episode_stats,
     }
 
 
@@ -834,7 +861,7 @@ def run_training_iteration(
     num_steps: int,
     iteration: int,
     num_prop: int,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """运行单次训练迭代
 
     Args:
@@ -847,17 +874,29 @@ def run_training_iteration(
         num_prop: proprio 维度
 
     Returns:
-        训练信息字典
+        训练信息字典，包含 PPO 损失和 episode 统计
     """
     # 更新 Domain Randomization 课程
     if domain_rand is not None:
         domain_rand.update_curriculum(iteration)
 
     # 收集 rollouts
-    last_obs = collect_rollouts(env, ppo, domain_rand, num_steps, num_prop)
+    rollout_result = collect_rollouts(env, ppo, domain_rand, num_steps, num_prop)
+
+    # 提取 episode 统计
+    episode_stats = rollout_result.get("episode_stats", {})
+
+    # 准备 last_obs 用于 compute_returns_and_update
+    last_obs = {
+        "proprio": rollout_result["proprio"],
+        "depth": rollout_result["depth"],
+    }
 
     # 计算 returns 并更新
     train_info = compute_returns_and_update(ppo, actor_critic, last_obs)
+
+    # 添加 episode 统计到训练信息
+    train_info["episode_stats"] = episode_stats
 
     return train_info
 
@@ -1088,20 +1127,18 @@ def run_training_loop(
 
     # 恢复训练
     start_iteration = 0
-    resume_run_id = None
     if resume_path is not None:
         start_iteration = load_training_checkpoint(
             Path(resume_path),
             actor_critic,
             ppo.optimizer,
         )
-        # TODO: 从 checkpoint 中恢复 wandb run_id
 
-    # 初始化 wandb
-    wandb_run = init_wandb(
+    # 初始化 TensorBoard 日志器
+    tb_logger = init_tensorboard(
         config=config,
         checkpoint_meta=checkpoint_meta,
-        resume_run_id=resume_run_id,
+        run_dir=run_dir,
     )
 
     # 训练循环
@@ -1122,17 +1159,24 @@ def run_training_loop(
 
         # 日志记录
         if iteration % config.log_interval == 0:
+            # 提取 episode 统计
+            episode_stats = train_info.get("episode_stats", {})
+            ep_return = episode_stats.get("mean_return", 0.0)
+            ep_length = episode_stats.get("mean_length", 0.0)
+            ep_count = episode_stats.get("count", 0)
+
             print(
                 f"[Iter {iteration}] "
-                f"value_loss={train_info['value_loss']:.4f} "
-                f"policy_loss={train_info['surrogate_loss']:.4f} "
-                f"entropy={train_info['entropy']:.4f} "
+                f"ep_ret={ep_return:.2f} ep_len={ep_length:.0f} ep_cnt={ep_count} | "
+                f"v_loss={train_info['value_loss']:.4f} "
+                f"p_loss={train_info['surrogate_loss']:.4f} "
+                f"ent={train_info['entropy']:.4f} "
                 f"kl={train_info['kl']:.4f} "
                 f"lr={train_info['learning_rate']:.2e}"
             )
 
-            # 记录到 wandb
-            if config.use_wandb and wandb_run is not None:
+            # 记录到 TensorBoard
+            if config.use_tensorboard and tb_logger is not None:
                 # 获取 Domain Randomization 参数
                 domain_rand_params = None
                 if domain_rand is not None and config.domain_rand_curriculum:
@@ -1142,9 +1186,11 @@ def run_training_loop(
 
                 # 记录训练指标
                 log_training_metrics(
+                    logger=tb_logger,
                     iteration=iteration,
                     train_info=train_info,
                     domain_rand_params=domain_rand_params,
+                    episode_stats=episode_stats,
                 )
 
         # 保存检查点
@@ -1158,14 +1204,6 @@ def run_training_loop(
                 config=vars(config),
             )
 
-            # 上传到 wandb
-            if config.use_wandb and wandb_run is not None:
-                save_checkpoint_to_wandb(
-                    checkpoint_path=checkpoint_path,
-                    iteration=iteration,
-                    is_best=False,
-                )
-
     # 保存最终检查点
     final_checkpoint_path = run_dir / "checkpoint_final.pt"
     save_training_checkpoint(
@@ -1176,15 +1214,13 @@ def run_training_loop(
         config=vars(config),
     )
 
-    # 上传最终检查点到 wandb
-    if config.use_wandb and wandb_run is not None:
-        save_checkpoint_to_wandb(
-            checkpoint_path=final_checkpoint_path,
-            iteration=config.max_iterations,
-            is_best=False,
-        )
-        # 完成 wandb run
-        wandb_run.finish()
+    # 关闭 TensorBoard 日志器
+    if config.use_tensorboard and tb_logger is not None and tb_logger.enabled:
+        try:
+            tb_logger.finish()
+            print("[tensorboard] 日志记录已完成")
+        except Exception as e:
+            print(f"[tensorboard] 警告: 完成日志记录时出错: {e}")
 
     print(f"[INFO] Training completed. Final checkpoint: {final_checkpoint_path}")
 

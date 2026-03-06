@@ -193,9 +193,21 @@ class StudentRolloutStorage:
 
         # Store other tensors
         self.actions[step].copy_(actions)
+        # Ensure rewards has correct shape [num_envs, 1]
+        if rewards.dim() == 1:
+            rewards = rewards.unsqueeze(-1)
         self.rewards[step].copy_(rewards)
+        # Ensure values has correct shape [num_envs, 1]
+        if values.dim() == 1:
+            values = values.unsqueeze(-1)
         self.values[step].copy_(values)
+        # Ensure log_probs has correct shape [num_envs, 1]
+        if log_probs.dim() == 1:
+            log_probs = log_probs.unsqueeze(-1)
         self.log_probs[step].copy_(log_probs)
+        # Ensure dones has correct shape [num_envs, 1]
+        if dones.dim() == 1:
+            dones = dones.unsqueeze(-1)
         self.dones[step].copy_(dones)
         self.mu[step].copy_(mu)
         self.sigma[step].copy_(sigma)

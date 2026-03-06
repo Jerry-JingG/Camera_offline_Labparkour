@@ -78,12 +78,12 @@ class PPOStudent:
         gamma: float = 0.99,
         lam: float = 0.95,
         value_loss_coef: float = 1.0,
-        entropy_coef: float = 0.01,
+        entropy_coef: float = 0.001,  # 降低熵系数，避免鼓励增加噪声
         learning_rate: float = 1e-4,
         max_grad_norm: float = 1.0,
         use_clipped_value_loss: bool = True,
         schedule: str = "adaptive",
-        desired_kl: float = 0.01,
+        desired_kl: float = 0.01,  # 单维度平均 KL 目标，与原生 PPO 一致
         device: str = "cuda",
     ) -> None:
         # Input validation
@@ -368,11 +368,14 @@ class PPOStudent:
             )
 
             # Compute KL divergence for adaptive LR
+            # KL(old || new) = log(σ_new/σ_old) + (σ_old² + (μ_old-μ_new)²)/(2σ_new²) - 0.5
+            # 使用 mean 而不是 sum，得到单维度平均 KL，与原生 PPO 的 desired_kl=0.01 一致
+            # 修复数值稳定性：分开计算 log，避免除法产生极大值
             with torch.no_grad():
-                kl = torch.sum(
-                    torch.log(sigma / old_sigma_flat + 1e-5)
+                kl = torch.mean(
+                    torch.log(sigma + 1e-8) - torch.log(old_sigma_flat + 1e-8)
                     + (old_sigma_flat.pow(2) + (old_mu_flat - mu).pow(2))
-                    / (2.0 * sigma.pow(2))
+                    / (2.0 * sigma.pow(2) + 1e-8)
                     - 0.5,
                     dim=-1,
                 )
@@ -408,7 +411,7 @@ class PPOStudent:
         # Adaptive learning rate
         if self.schedule == "adaptive" and self.desired_kl is not None:
             if mean_kl > self.desired_kl * 2.0:
-                self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                self.learning_rate = max(1e-7, self.learning_rate / 1.5)  # 降低下限到 1e-7
             elif mean_kl < self.desired_kl / 2.0 and mean_kl > 0.0:
                 self.learning_rate = min(1e-2, self.learning_rate * 1.5)
 

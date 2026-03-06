@@ -176,40 +176,6 @@ def _add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--headless", action="store_true", help="无头模式运行")
     parser.add_argument("--video", action="store_true", help="录制视频")
 
-    # wandb 配置
-    wandb_group = parser.add_argument_group("wandb 配置")
-    wandb_group.add_argument(
-        "--wandb",
-        action="store_true",
-        help="启用 wandb 日志记录",
-    )
-    wandb_group.add_argument(
-        "--wandb_project",
-        type=str,
-        default="student-rl-finetune",
-        help="wandb 项目名称",
-    )
-    wandb_group.add_argument(
-        "--wandb_entity",
-        type=str,
-        default=None,
-        help="wandb 实体（用户名或团队名）",
-    )
-    wandb_group.add_argument(
-        "--wandb_run_name",
-        type=str,
-        default=None,
-        help="wandb run 名称（默认自动生成）",
-    )
-    wandb_group.add_argument(
-        "--wandb_tags",
-        type=str,
-        nargs="+",
-        default=None,
-        help="wandb run 标签",
-    )
-
-
 def _add_eval_args(parser: argparse.ArgumentParser) -> None:
     """添加评估参数"""
     # 必需参数
@@ -348,12 +314,6 @@ def run_training(args: argparse.Namespace) -> Optional[Path]:
         save_interval=args.save_interval,
         log_interval=args.log_interval,
         device=args.device,
-        # wandb 配置
-        use_wandb=args.wandb,
-        wandb_project=args.wandb_project,
-        wandb_entity=args.wandb_entity,
-        wandb_run_name=args.wandb_run_name,
-        wandb_tags=args.wandb_tags,
     )
     config.validate()
 

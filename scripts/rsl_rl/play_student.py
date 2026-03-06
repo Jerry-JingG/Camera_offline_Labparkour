@@ -21,6 +21,13 @@ import numpy as np
 
 import torch
 
+# 确保 scripts/rsl_rl 目录在 sys.path 最前面，避免与 parkour_isaaclab/utils.py 冲突
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path or sys.path.index(_SCRIPT_DIR) > 0:
+    if _SCRIPT_DIR in sys.path:
+        sys.path.remove(_SCRIPT_DIR)
+    sys.path.insert(0, _SCRIPT_DIR)
+
 from utils.camera_blackout_manager import CameraBlackoutManager
 
 from isaaclab.app import AppLauncher

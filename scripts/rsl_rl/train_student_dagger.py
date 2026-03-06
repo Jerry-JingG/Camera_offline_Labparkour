@@ -41,6 +41,13 @@ PARKOUR_TASKS_ROOT = os.path.join(PROJECT_ROOT, "parkour_tasks")
 if PARKOUR_TASKS_ROOT not in sys.path:
     sys.path.insert(0, PARKOUR_TASKS_ROOT)
 
+# 确保 scripts/rsl_rl 目录在 sys.path 最前面，避免与 parkour_isaaclab/utils.py 冲突
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path or sys.path.index(_SCRIPT_DIR) > 0:
+    if _SCRIPT_DIR in sys.path:
+        sys.path.remove(_SCRIPT_DIR)
+    sys.path.insert(0, _SCRIPT_DIR)
+
 # === Import aggregator and student policy (same directory) ===
 from train_student_from_dataset import SequenceAggregator, MultiModalStudentPolicy, TransformerXLTemporal
 from utils.dropout_manager import CameraDropoutManager
@@ -365,8 +372,8 @@ def main():
             # TXL 单步推理：使用记忆状态 txl_mems
             student.eval()
             with torch.no_grad():
-                # Student prediction (yaw_pred_step removed)
-                actions_step, _, new_mems = student.forward_step(prop_step, depth_step, mems=txl_mems)
+                # Student prediction (yaw_pred removed from return values)
+                actions_step, new_mems = student.forward_step(prop_step, depth_step, mems=txl_mems)
                 student_act = actions_step.cpu()
 
             # 在环境 step 前缓存当前的 goal 索引（否则 step 内部 reset 后 cur_goal_idx 会被清零）

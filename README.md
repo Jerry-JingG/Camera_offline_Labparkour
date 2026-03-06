@@ -77,8 +77,55 @@ https://github.com/user-attachments/assets/82a5cecb-ffbf-4a46-8504-79188a147c40
 ### 3.3. Evaluation Student Policy
 
 ```
-python scripts/rsl_rl/evaluation.py --task Isaac-Extreme-Parkour-Student-Unitree-Go2-Eval-v0 
+python scripts/rsl_rl/evaluation.py --task Isaac-Extreme-Parkour-Student-Unitree-Go2-Eval-v0
 ```
+
+## RL Fine-tuning (Student Policy 强化学习微调)
+
+对 DAgger 训练的 Student Policy 进行 PPO 强化学习微调，通过 Domain Randomization 增强策略的鲁棒性。
+
+### 4.1. RL Fine-tuning 训练
+
+```bash
+# 激活 conda 环境
+conda activate parkour
+
+# 基本训练（直接运行，无需 ./isaaclab.sh）
+python scripts/rsl_rl/run_student_rl_finetune.py train \
+    --dagger_checkpoint logs/dagger/best.pt \
+    --headless
+
+# 带完整参数的训练
+python scripts/rsl_rl/run_student_rl_finetune.py train \
+    --dagger_checkpoint logs/dagger/best.pt \
+    --num_envs 512 \
+    --max_iterations 20000 \
+    --learning_rate 1e-4 \
+    --freeze_encoders \
+    --headless
+```
+
+### 4.2. 鲁棒性评估
+
+```bash
+# 评估所有场景
+python scripts/rsl_rl/run_student_rl_finetune.py evaluate \
+    --checkpoint logs/finetune/final.pt \
+    --headless
+
+# 评估特定场景
+python scripts/rsl_rl/run_student_rl_finetune.py evaluate \
+    --checkpoint logs/finetune/final.pt \
+    --scenarios CLEAN HIGH_NOISE CAMERA_DROPOUT \
+    --headless
+```
+
+### 4.3. 相关文档
+
+- [RL Fine-tuning 设计文档](docs/plans/2026-02-02-rl-finetuning-design.md)
+- [架构文档](docs/architecture/2026-02-02-rl-finetuning-architecture.md)
+- [调试记录](docs/phases/PHASE7_RL_FINETUNE_DEBUG.md) - 问题排查参考
+- [阶段文档索引](docs/phases/README.md) - 完整实施文档
 
 ## How to deploy in IsaacLab
 
