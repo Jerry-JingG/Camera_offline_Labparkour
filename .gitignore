@@ -94,3 +94,5 @@ temp/
 
 # Git worktrees
 .worktrees/
+
+drawio/
