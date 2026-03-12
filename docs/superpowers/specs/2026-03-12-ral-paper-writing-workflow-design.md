@@ -56,24 +56,34 @@ VSCode LaTeX 工作区（IEEE RAL 模板）
 
 采用**独立仓库 + VSCode Multi-root Workspace** 方案，彻底隔离代码和论文。
 
-### 4.1 代码仓库（现有）
+### 4.1 Agent 配置文件位置
+
+所有 6 个 agent 配置文件放在**用户主目录**的全局 agents 目录，Claude Code 可识别：
+
+```
+~/.claude/agents/
+├── paper-director.md
+├── code-analyzer.md
+├── style-analyzer.md
+├── latex-writer.md
+├── reference-finder.md
+└── ai-reviewer.md
+```
+
+> 注：每个 agent 配置文件中必须用**绝对路径**引用两个仓库，不依赖相对路径或 VSCode workspace 上下文。例如：
+> - 代码仓库：`/home/droplet/IsaacLab/Camera_offline_Labparkour/`
+> - 论文仓库：`/home/droplet/ral-camera-fault-paper/`（Phase 0 初始化时确定）
+
+### 4.2 代码仓库（现有，不变）
 
 ```
 Camera_offline_Labparkour/
-├── .claude/
-│   └── agents/
-│       ├── paper-director.md
-│       ├── code-analyzer.md
-│       ├── style-analyzer.md
-│       ├── latex-writer.md
-│       ├── reference-finder.md
-│       └── ai-reviewer.md
 ├── parkour_tasks/
 ├── scripts/
 └── ...（现有代码不变）
 ```
 
-### 4.2 论文仓库（新建）
+### 4.3 论文仓库（新建）
 
 ```
 ral-camera-fault-paper/
@@ -87,12 +97,14 @@ ral-camera-fault-paper/
 │   ├── experiments.tex
 │   └── conclusion.tex
 ├── figures/                  ← 图表（手动放置）
-├── example_papers/           ← 用户提供的示范 PDF
+├── example_papers/           ← 用户提供的示范 PDF（加入 .gitignore，勿提交）
 ├── context/
 │   ├── code_summary.md       ← code-analyzer 输出
-│   └── style_guide.md        ← style-analyzer 输出
-└── .gitignore                ← 排除 *.aux *.log *.pdf *.synctex.gz
+│   └── style_guide.md        ← style-analyzer 输出（格式见第 8 节）
+└── .gitignore                ← 排除 *.aux *.log *.pdf *.synctex.gz example_papers/
 ```
+
+> **版权提示**：`example_papers/` 中的 IEEE 论文 PDF 受版权保护，必须加入 `.gitignore`，仅本地保存，不提交到远程仓库。
 
 ### 4.3 VSCode Multi-root Workspace
 
@@ -116,17 +128,26 @@ ral-camera-fault-paper/
 
 ### Phase 0：一次性初始化
 
-1. 新建论文仓库，初始化 IEEE RAL LaTeX 模板
+1. 新建论文仓库，初始化 IEEE RAL LaTeX 模板，记录其绝对路径
 2. 安装 VSCode 扩展：LaTeX Workshop
 3. 创建 `.code-workspace` 文件
-4. 将示范 PDF 放入 `example_papers/`
-5. 在代码仓库 `.claude/agents/` 下创建 6 个 agent 配置文件
+4. 将示范 PDF 放入 `example_papers/`，并将该目录加入 `.gitignore`
+5. 在 `~/.claude/agents/` 下创建 6 个 agent 配置文件，**在每个文件中硬编码两个仓库的绝对路径**
+6. 在论文仓库中安装 `pdftotext`（`poppler-utils` 包），供 `style-analyzer` 使用
 
 ### Phase 1：启动阶段（并行）
 
 `paper-director` 同时调度：
-- `code-analyzer`：扫描代码仓库，输出 `context/code_summary.md`
-- `style-analyzer`：读取 `example_papers/` 下所有 PDF，输出 `context/style_guide.md`
+- `code-analyzer`：扫描代码仓库的 `parkour_tasks/`、`scripts/rsl_rl/`、`*.py` 文件，重点提取：
+  - 网络结构定义（Transformer Encoder + Transformer XL）
+  - DAgger 训练逻辑
+  - 观测空间设计（视觉 + 本体）
+  - 实验配置和超参数
+  - 输出 `context/code_summary.md`
+- `style-analyzer`：
+  1. 用 `pdftotext` 将 `example_papers/*.pdf` 转为 `.txt`
+  2. 读取文本，提取写作风格特征
+  3. 输出 `context/style_guide.md`（格式见第 8 节）
 
 两者完成后，`paper-director` 向用户汇报分析结果。
 
@@ -141,7 +162,7 @@ ral-camera-fault-paper/
 
 ### Phase 3：逐节写作循环
 
-对每个章节重复以下循环：
+对每个章节重复以下循环（**单节最多 3 轮修订**）：
 
 ```
 latex-writer 起草 .tex
@@ -154,13 +175,18 @@ latex-writer 按 ai-reviewer 反馈修订
 用户审阅 → 满意则进入下一节，否则继续循环
 ```
 
+**终止条件**：
+- 用户满意 → 进入下一节
+- 已修订 3 轮仍未通过 → `paper-director` 向用户汇报，请求人工干预
+
 ### Phase 4：完稿阶段
 
 1. 全文整合，检查章节衔接
-2. LaTeX Workshop 编译 PDF
-3. 检查格式符合 IEEE RAL 要求（页数、图表格式、参考文献格式）
-4. `references.bib` 去重和格式统一
-5. 最终 PDF 输出
+2. **对完整 `main.tex` 运行 `ai-reviewer` 全文扫描**（检查章节衔接处的 AI 写作特征）
+3. LaTeX Workshop 编译 PDF
+4. 检查格式符合 IEEE RAL 要求（页数、图表格式、参考文献格式）
+5. `references.bib` 去重和格式统一
+6. 最终 PDF 输出
 
 ---
 
@@ -186,3 +212,39 @@ latex-writer 按 ai-reviewer 反馈修订
 - 自动生成标准 BibTeX 格式条目
 - 在对应 `.tex` 文件中插入 `\cite{key}` 标记
 - 避免重复引用（检查 `references.bib` 中已有条目）
+
+---
+
+## 8. style_guide.md 输出格式规范
+
+`style-analyzer` 输出的 `context/style_guide.md` 必须包含以下结构化字段，供 `ai-reviewer` 和 `latex-writer` 使用：
+
+```markdown
+# 写作风格指南
+
+## 1. 常用句式列表
+- 示例句式 1
+- 示例句式 2
+...
+
+## 2. 段落长度统计
+- 平均段落长度：X 句
+- 段落长度范围：Y-Z 句
+
+## 3. 句子长度统计
+- 平均句子长度：X 词
+- 句子长度方差：Y
+
+## 4. 引用密度
+- 平均每段引用数：X 个
+
+## 5. 术语使用习惯
+- 高频术语：term1, term2, ...
+- 避免使用的词：word1, word2, ...
+
+## 6. 图表描述方式
+- 示例描述 1
+- 示例描述 2
+```
+
+此格式确保 `ai-reviewer` 可以解析并与待审查文本对比。
