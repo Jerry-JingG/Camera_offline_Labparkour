@@ -204,7 +204,7 @@ def main() -> None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用包含相机观测的环境配置。")
 
         obs_prop = obs[:, :proprio_dim]
-        # obs_prop[:, 7] = 0
+        obs_prop[:, 6:8] = 0
         obs_prop[:, 12] = dones_bool.float()
 
         if dropout_manager:
