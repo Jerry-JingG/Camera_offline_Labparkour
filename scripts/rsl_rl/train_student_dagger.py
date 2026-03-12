@@ -170,7 +170,7 @@ class StudentOnlineRunner:
 
         # [Answer 4] Direct Model Call
         with torch.no_grad():
-            actions, self.mems = self.model.forward_with_mems(
+            actions, _, self.mems = self.model.forward_with_mems(
                 prop_input,
                 depth_input,
                 mems=self.mems
@@ -364,6 +364,8 @@ def main():
             # C. Dropout
             # Create copies for student (augmented) vs teacher (clean)
             student_prop = obs[:, :proprio_dim].clone()
+            extra_info = obs[:, 6:8].clone()
+            student_prop[:, 6:8] = 0.0  # 消除观测中的delta_yaw与delta_next_yaw真值
             student_prop[:, 12] = dones_bool.float()
             student_depth = depth_image.clone()
 
@@ -402,7 +404,8 @@ def main():
                 obs_prop=student_prop.cpu().numpy(),
                 depth_frame=student_depth.cpu().numpy(),
                 teacher_actions=teacher_actions.cpu().numpy(),
-                done=dones_bool.cpu().numpy()
+                done=dones_bool.cpu().numpy(),
+                extra_info=extra_info.cpu().numpy()
             )
 
             # H. Handle Resets for Inference Runner
@@ -439,13 +442,15 @@ def main():
         b_depth = batch_data["depth"].to(device)
         b_actions = batch_data["actions"].to(device)
         b_dones = batch_data["dones"].to(device)
+        true_yaws = batch_data["extra_infos"].to(device)
 
         # Forward with segment recurrence
-        pred_actions, new_train_mems = student_model.forward_with_mems(
+        pred_actions, pred_yaws, new_train_mems = student_model.forward_with_mems(
             b_prop, b_depth, mems=train_mems
         )
-
-        loss = nn.functional.mse_loss(pred_actions, b_actions)
+        action_loss = nn.functional.mse_loss(pred_actions, b_actions)
+        yaw_loss = nn.functional.mse_loss(pred_yaws, true_yaws)
+        loss = action_loss + yaw_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -486,11 +491,12 @@ def main():
                 diff_rmse = torch.sqrt(torch.mean((pred_actions - b_actions) ** 2)).item()
                 teacher_rms = torch.sqrt(torch.mean(b_actions ** 2)).item()
 
-            print(f"[Iter {it+1}] Loss: {loss.item():.5f} | Time: {dt:.2f}s | RMSE: {diff_rmse:.4f}")
+            print(f"[Iter {it+1}] Action Loss: {action_loss.item():.5f} | Yaw Loss: {yaw_loss.item():.5f} | Time: {dt:.2f}s | RMSE: {diff_rmse:.4f}")
 
             if args.wandb and WANDB_AVAILABLE:
                 log_data = {
-                    "dagger/loss": loss.item(),
+                    "dagger/action_loss": action_loss.item(),
+                    "dagger/yaw_loss": yaw_loss.item(),
                     "dagger/diff_rmse": diff_rmse,
                     "dagger/teacher_rms": teacher_rms,
                     "dagger/iter_time": dt,

@@ -73,7 +73,8 @@ class SequenceAggregator:
         depth_hist_len: int,
         sequence_len: int,
         num_prop: int = 53,
-        depth_shape: Tuple[int, int] = (58, 87)
+        depth_shape: Tuple[int, int] = (58, 87),
+        extra_info_dim: int = 2
     ) -> None:
         self.num_envs = num_envs
         self.prop_hist_len = prop_hist_len
@@ -91,6 +92,7 @@ class SequenceAggregator:
 
         self.seq_action = None
         self.seq_done = torch.zeros((num_envs, sequence_len), dtype=torch.bool)
+        self.seq_info = torch.zeros((num_envs, sequence_len, extra_info_dim), dtype=torch.float32)
 
         self.current_seq_step = 0
 
@@ -102,10 +104,11 @@ class SequenceAggregator:
         self.seq_depth.zero_()
         self.seq_action = None
         self.seq_done.zero_()
+        self.seq_info.zero_()
 
         self.current_seq_step = 0
 
-    def push_step(self, obs_prop: np.ndarray, depth_frame: np.ndarray, teacher_actions: np.ndarray, done: np.ndarray):
+    def push_step(self, obs_prop: np.ndarray, depth_frame: np.ndarray, teacher_actions: np.ndarray, done: np.ndarray, extra_info: np.ndarray):
         """
         接收 Numpy 数据，转为 Tensor 并更新历史 buffer 和 sequence buffer。
         """
@@ -114,6 +117,7 @@ class SequenceAggregator:
         depth_frame_t = torch.from_numpy(depth_frame)
         teacher_actions_t = torch.from_numpy(teacher_actions)
         done_t = torch.from_numpy(done)
+        extra_info_t = torch.from_numpy(extra_info)
 
         # --- 1. 更新历史 (整体左移) ---
         self.prop_histories = torch.roll(self.prop_histories, -1, dims=1)
@@ -138,6 +142,7 @@ class SequenceAggregator:
         self.seq_depth[:, idx] = self.depth_histories
         self.seq_action[:, idx] = teacher_actions_t
         self.seq_done[:, idx] = done_t
+        self.seq_info[:, idx] = extra_info_t
 
         # --- 3. 处理 Done (批量清零) ---
         if done_t.any():
@@ -160,7 +165,8 @@ class SequenceAggregator:
             "proprio": self.seq_prop.clone(),
             "depth": self.seq_depth.clone(),
             "actions": self.seq_action.clone(),
-            "dones": self.seq_done.clone()
+            "dones": self.seq_done.clone(),
+            "extra_infos": self.seq_info.clone()
         }
 
 
@@ -237,8 +243,12 @@ class TeacherDatasetStreamer:
                 num_steps = obs_prop.shape[0]
 
                 for step_idx in range(num_steps):
-                    current_obs_prop = obs_prop[step_idx].copy()
+                    current_obs_prop = obs_prop[step_idx]
                     depth_frame = self._convert_depth(depth[step_idx])
+
+                    extra_info = current_obs_prop[:, 6:8].copy()
+                    current_obs_prop[:, 6:8] = 0.0
+                    current_obs_prop[:, 12] = prev_dones.numpy().astype(np.float32)
 
                     if self.dropout_manager is not None:
                         self.dropout_manager.reset_env(prev_dones)
@@ -257,6 +267,7 @@ class TeacherDatasetStreamer:
                         depth_frame=depth_frame,
                         teacher_actions=actions[step_idx],
                         done=dones[step_idx].reshape(-1),
+                        extra_info=extra_info
                     )
 
                     if batch_data is not None:
@@ -340,6 +351,11 @@ class MultiModalStudentPolicy(nn.Module):
             tanh_output=action_head_cfg.get("tanh_output", False),  # 应该使用激活函数吗？教师模型tanh_encoder_output = False，会输出>1的action
             action_scale=action_head_cfg.get("action_scale", 1.0),
         )
+        self.yaw_head = nn.Sequential(
+            nn.Linear(token_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 2)  # 输出 delta_yaw 和 delta_next_yaw
+        )
 
     def forward(self, proprio_seq: Tensor, depth_seq: Tensor) -> Tensor:
         """
@@ -388,7 +404,8 @@ class MultiModalStudentPolicy(nn.Module):
             return_mems=True,    # Return new mems for next segment
         )
         actions = self.action_head.forward_sequence(temporal_out)["mean"]
-        return actions, new_mems
+        predicted_yaws = self.yaw_head(temporal_out)
+        return actions, predicted_yaws, new_mems
 
 
 def parse_args() -> argparse.Namespace:
@@ -714,11 +731,14 @@ def train_batch(
     depth = batch_data["depth"].to(device)
     teacher_actions = batch_data["actions"].to(device)
     dones = batch_data["dones"].to(device)  # [B, S]
+    true_yaws = batch_data["extra_infos"].to(device)
 
     # Use forward_with_mems for segment recurrence training
-    predictions, new_mems = model.forward_with_mems(proprio, depth, mems=mems)
+    predictions, pred_yaws, new_mems = model.forward_with_mems(proprio, depth, mems=mems)
 
-    loss = torch.nn.functional.mse_loss(predictions, teacher_actions)
+    action_loss = torch.nn.functional.mse_loss(predictions, teacher_actions)
+    yaw_loss = torch.nn.functional.mse_loss(pred_yaws, true_yaws)
+    loss = action_loss + yaw_loss
 
     # Compute additional metrics
     with torch.no_grad():

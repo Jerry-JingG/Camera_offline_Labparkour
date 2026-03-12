@@ -209,7 +209,7 @@ class StudentOnlineRunner:
 
         # [Answer 4] Direct Model Call
         with torch.no_grad():
-            actions, self.mems = self.model.forward_with_mems(
+            actions, _, self.mems = self.model.forward_with_mems(
                 prop_input,
                 depth_input,
                 mems=self.mems
@@ -334,6 +334,7 @@ def main() -> None:
         if depth_image is None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
         obs_prop = obs[:, :proprio_dim]
+        obs_prop[:, 6:8] = 0.0
         obs_prop[:, 12] = dones_bool.float()
 
         if dropout_manager:

@@ -20,7 +20,7 @@ DEPTH_HIST_LEN=1                                            # --depth_hist_len�
 
 TEACHER_CHECKPOINT="logs/rsl_rl/unitree_go2_parkour/2026-01-28_22-35-55_try2/model_74000.pt"    # 教师 PPO 权重路径
 STUDENT_CHECKPOINT=""                                           # 可选：已有学生模型 checkpoint
-SAVE_DIR="outputs/students/trainxl_from_dataset/dagger0219"          # 输出目录
+SAVE_DIR="outputs/students/train_from_dagger/xl0312_yawhead"          # 输出目录
 
 LEARNING_RATE=3e-4                                              # --learning_rate
 WEIGHT_DECAY=1e-4                                               # --weight_decay
@@ -40,7 +40,7 @@ USE_DROPOUT=true
 # ------------------------------- 日志 / W&B 参数 -------------------------------
 USE_WANDB=true                                                 # --wandb：是否开启 W&B
 WANDB_PROJECT="camera-offline-parkour"                          # --wandb_project
-WANDB_RUN_NAME="dagger-txl-dropout-0219"                        # --wandb_run_name
+WANDB_RUN_NAME="dagger-txl-0312-yawhead"                        # --wandb_run_name
 
 # --------------------------- AppLauncher / Isaac 参数 -------------------------
 DEVICE_ARG="cuda:0"                                             # --device
