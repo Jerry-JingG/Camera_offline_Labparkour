@@ -97,5 +97,6 @@ temp/
 
 drawio/
 
-./claude
-./superpowers
+# Claude Code and superpowers directories
+.claude/
+.superpowers/
