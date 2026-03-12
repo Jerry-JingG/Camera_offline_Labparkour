@@ -8,7 +8,7 @@
 
 ## 1. 概述
 
-本文档描述一套在 VSCode 中运行的 Claude Code agent team 工作流，用于辅助撰写 RAL 学术论文。工作流采用**中央调度器模式**：用户只与主 agent（`paper-director`）对话，主 agent 在用户确认写作思路后并行调度专职子 agents 完成代码分析、风格学习、LaTeX 写作、参考文献查找和 AI 率审查。
+本文档描述一套在 VSCode 中运行的 Claude Code agent team 工作流，用于辅助撰写 RAL 学术论文。工作流采用 **Agent Teams 模式**：用户与 `paper-director` 对话，`paper-director` 作为 team lead 负责讨论写作思路、创建团队、分配任务；其余 5 个 agents 作为 teammates 并行工作，通过共享任务列表（TaskList）和消息（SendMessage）协调，完成代码分析、风格学习、LaTeX 写作、参考文献查找和 AI 审查。
 
 ---
 
@@ -23,32 +23,39 @@
 
 ## 3. Agent 架构
 
-### 3.1 中央调度器模式
+### 3.1 Agent Teams 模式
 
 ```
 用户
  ↕ 对话 / 审批
-paper-director（主 Agent）
- ↓ 并行调度（达成共识后）
-┌─────────────────────────────────────────┐
-│ code-analyzer   style-analyzer          │
-│ latex-writer    reference-finder        │
-│ ai-reviewer                             │
-└─────────────────────────────────────────┘
+paper-director（Team Lead）
+ ↕ TaskCreate / SendMessage
+┌──────────────────────────────────────────────┐
+│  共享任务列表（TaskList: ral-paper-team）       │
+│                                              │
+│  code-analyzer   ←→ style-analyzer          │
+│  latex-writer    ←→ reference-finder        │
+│  ai-reviewer                                │
+└──────────────────────────────────────────────┘
  ↓
 VSCode LaTeX 工作区（IEEE RAL 模板）
 ```
 
+**关键规则**：
+- 所有 agent 间协调经过 `paper-director`，teammates 不直接互发指令
+- `paper-director` 通过 `TaskCreate` 分配任务，teammates 通过 `SendMessage` 汇报完成
+- 每节写作完成后，`paper-director` 必须等待用户手动确认后才进入下一节
+
 ### 3.2 Agent 列表
 
-| Agent | 职责 | 输入 | 输出 |
-|-------|------|------|------|
-| `paper-director` | 主 agent，与用户讨论写作思路，调度子 agents | 用户对话 | 写作决策、调度指令 |
-| `code-analyzer` | 读取代码仓库，提取算法/网络结构/实验配置 | 代码仓库 | `context/code_summary.md` |
-| `style-analyzer` | 分析示范论文（通过 arXiv/DOI 链接），提取写作风格 | `example_papers.txt` | `context/style_guide.md` |
-| `latex-writer` | 基于摘要和风格指南起草各章节 LaTeX | `code_summary.md` + `style_guide.md` | `sections/*.tex` |
-| `reference-finder` | 联网搜索相关文献，生成 BibTeX 条目 | 章节内容 | `references.bib` + `\cite{}` |
-| `ai-reviewer` | 检测 AI 写作特征，提出人性化修改建议 | `sections/*.tex` | 逐句反馈报告 |
+| Agent | Team Role | 职责 | 输入 | 输出 |
+|-------|-----------|------|------|------|
+| `paper-director` | Team Lead | 与用户讨论写作思路，创建团队，分配任务，汇总结果 | 用户对话 | TaskCreate、写作决策 |
+| `code-analyzer` | Teammate | 读取代码仓库，提取算法/网络结构/实验配置 | 代码仓库 | `context/code_summary.md` |
+| `style-analyzer` | Teammate | 分析示范论文（通过 arXiv/DOI 链接），提取写作风格 | `example_papers.txt` | `context/style_guide.md` |
+| `latex-writer` | Teammate | 基于摘要和风格指南起草各章节 LaTeX | `code_summary.md` + `style_guide.md` | `sections/*.tex` |
+| `reference-finder` | Teammate | 联网搜索相关文献，生成 BibTeX 条目 | 章节内容 | `references.bib` + `\cite{}` |
+| `ai-reviewer` | Teammate | 检测 AI 写作特征，提出人性化修改建议 | `sections/*.tex` | 逐句反馈报告 |
 
 ---
 
@@ -129,23 +136,23 @@ ral-camera-fault-paper/
 1. 新建论文仓库，初始化 IEEE RAL LaTeX 模板，记录其绝对路径
 2. 安装 VSCode 扩展：LaTeX Workshop
 3. 创建 `.code-workspace` 文件
-4. 创建 `example_papers.txt`，每行一个示范论文的 arXiv 链接或 DOI（如 `https://arxiv.org/abs/2301.12345` 或 `10.1109/LRA.2023.1234567`）
-5. 在 `~/.claude/agents/` 下创建 6 个 agent 配置文件，**在每个文件中硬编码两个仓库的绝对路径**
+4. 创建 `example_papers.txt`，每行一个示范论文的 arXiv 链接或 DOI
+5. 在 `~/.claude/agents/` 下创建 5 个 teammate agent 配置文件
 
 ### Phase 1：启动阶段（并行）
 
-`paper-director` 同时调度：
-- `code-analyzer`：扫描代码仓库的 `parkour_tasks/`、`scripts/rsl_rl/`、`*.py` 文件，重点提取：
-  - 网络结构定义（Transformer Encoder + Transformer XL）
-  - DAgger 训练逻辑
-  - 观测空间设计（视觉 + 本体）
-  - 实验配置和超参数
-  - 输出 `context/code_summary.md`
-- `style-analyzer`：
-  1. 读取 `example_papers.txt` 中的 arXiv 链接或 DOI
-  2. 用 WebFetch 工具逐个获取论文全文（arXiv 提供 HTML 版本，DOI 可通过 Semantic Scholar API 获取摘要和部分内容）
-  3. 提取写作风格特征
-  4. 输出 `context/style_guide.md`（格式见第 8 节）
+`paper-director` 执行：
+```
+TeamCreate("ral-paper-team")
+spawn code-analyzer  (team_name="ral-paper-team")  ─┐ 并行
+spawn style-analyzer (team_name="ral-paper-team")  ─┘
+TaskCreate: "分析代码仓库" → assign: code-analyzer
+TaskCreate: "分析示范论文风格" → assign: style-analyzer
+```
+
+两个 teammates 自主并行工作：
+- `code-analyzer`：扫描 `parkour_tasks/`、`scripts/rsl_rl/`，提取网络结构/DAgger 逻辑/观测空间/超参数，写入 `context/code_summary.md`，完成后 `SendMessage(to: paper-director)`
+- `style-analyzer`：读取 `example_papers.txt`，用 WebFetch 获取论文内容，提取风格特征，写入 `context/style_guide.md`，完成后 `SendMessage(to: paper-director)`
 
 两者完成后，`paper-director` 向用户汇报分析结果。
 
@@ -163,14 +170,24 @@ ral-camera-fault-paper/
 对每个章节重复以下循环（**单节最多 3 轮修订**）：
 
 ```
-latex-writer 起草 .tex
+paper-director:
+  TaskCreate: "起草 {section}.tex" → assign: latex-writer
         ↓
-reference-finder ──┐  （并行）
-ai-reviewer      ──┘
+latex-writer 完成后 SendMessage(broadcast): "初稿完成"
         ↓
-latex-writer 按 ai-reviewer 反馈修订
+paper-director:
+  TaskCreate: "查找参考文献" → assign: reference-finder  ─┐ 并行
+  TaskCreate: "AI 审查"     → assign: ai-reviewer       ─┘
         ↓
-用户审阅 → 满意则进入下一节，否则继续循环
+两者完成后 SendMessage(to: paper-director)
+        ↓
+paper-director 判断是否需要修订：
+  有修改建议 → TaskCreate: "修订 {section}.tex（附反馈）" → assign: latex-writer
+  无修改建议 → 直接进入用户审阅
+        ↓
+paper-director 向用户展示 sections/{section}.tex 内容，等待手动确认
+用户满意 → 进入下一节
+用户不满意 → 继续循环（最多 3 轮）
 ```
 
 **终止条件**：
@@ -179,12 +196,21 @@ latex-writer 按 ai-reviewer 反馈修订
 
 ### Phase 4：完稿阶段
 
+```
+paper-director:
+  TaskCreate: "全文 AI 写作特征扫描" → assign: ai-reviewer   ─┐ 并行
+  TaskCreate: "references.bib 去重整理" → assign: reference-finder ─┘
+        ↓
+两者完成后，paper-director 做最终整合检查
+        ↓
+SendMessage(shutdown_request) 给所有 teammates
+TeamDelete("ral-paper-team")
+```
+
 1. 全文整合，检查章节衔接
-2. **对完整 `main.tex` 运行 `ai-reviewer` 全文扫描**（检查章节衔接处的 AI 写作特征）
-3. LaTeX Workshop 编译 PDF
-4. 检查格式符合 IEEE RAL 要求（页数、图表格式、参考文献格式）
-5. `references.bib` 去重和格式统一
-6. 最终 PDF 输出
+2. LaTeX Workshop 编译 PDF
+3. 检查格式符合 IEEE RAL 要求（页数、图表格式、参考文献格式）
+4. 最终 PDF 输出
 
 ---
 
