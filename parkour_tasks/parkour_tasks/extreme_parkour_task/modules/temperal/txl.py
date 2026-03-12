@@ -183,7 +183,8 @@ class _TransformerXLLayer(torch.nn.Module):
             ff_out = self.ff(h)
             h = self.norm2(h + ff_out)
 
-        new_mem = self._update_mem(mem, h)
+        # new_mem = self._update_mem(mem, h)
+        new_mem = self._update_mem(mem, x)
         return h, new_mem
 
     def _ensure_mem(self, x: torch.Tensor, mem: Optional[torch.Tensor]) -> torch.Tensor:
@@ -191,13 +192,14 @@ class _TransformerXLLayer(torch.nn.Module):
             return x.new_empty(x.size(0), 0, x.size(2))
         return mem
 
-    def _update_mem(self, mem: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
+    def _update_mem(self, mem: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        # 维护了一个滑动窗口，在quick infernece时也维护了正确的记忆
         if self.mem_len == 0:
-            return h.new_empty(h.size(0), 0, h.size(2))
-        cat = torch.cat([mem, h], dim=1) if mem.size(1) > 0 else h
+            return x.new_empty(x.size(0), 0, x.size(2))
+        cat = torch.cat([mem, x], dim=1) if mem.size(1) > 0 else x
         if cat.size(1) > self.mem_len:
             cat = cat[:, -self.mem_len :, :]
-        return cat.detach()
+        return cat.detach()  # 梯度截断
 
 
 class _TemporalMultiHeadAttention(torch.nn.Module):
