@@ -45,7 +45,7 @@ VSCode LaTeX 工作区（IEEE RAL 模板）
 |-------|------|------|------|
 | `paper-director` | 主 agent，与用户讨论写作思路，调度子 agents | 用户对话 | 写作决策、调度指令 |
 | `code-analyzer` | 读取代码仓库，提取算法/网络结构/实验配置 | 代码仓库 | `context/code_summary.md` |
-| `style-analyzer` | 分析示范 PDF 论文，提取写作风格 | `example_papers/*.pdf` | `context/style_guide.md` |
+| `style-analyzer` | 分析示范论文（通过 arXiv/DOI 链接），提取写作风格 | `example_papers.txt` | `context/style_guide.md` |
 | `latex-writer` | 基于摘要和风格指南起草各章节 LaTeX | `code_summary.md` + `style_guide.md` | `sections/*.tex` |
 | `reference-finder` | 联网搜索相关文献，生成 BibTeX 条目 | 章节内容 | `references.bib` + `\cite{}` |
 | `ai-reviewer` | 检测 AI 写作特征，提出人性化修改建议 | `sections/*.tex` | 逐句反馈报告 |
@@ -97,14 +97,12 @@ ral-camera-fault-paper/
 │   ├── experiments.tex
 │   └── conclusion.tex
 ├── figures/                  ← 图表（手动放置）
-├── example_papers/           ← 用户提供的示范 PDF（加入 .gitignore，勿提交）
+├── example_papers.txt        ← 示范论文的 arXiv 链接或 DOI 列表
 ├── context/
 │   ├── code_summary.md       ← code-analyzer 输出
 │   └── style_guide.md        ← style-analyzer 输出（格式见第 8 节）
-└── .gitignore                ← 排除 *.aux *.log *.pdf *.synctex.gz example_papers/
+└── .gitignore                ← 排除 *.aux *.log *.pdf *.synctex.gz
 ```
-
-> **版权提示**：`example_papers/` 中的 IEEE 论文 PDF 受版权保护，必须加入 `.gitignore`，仅本地保存，不提交到远程仓库。
 
 ### 4.3 VSCode Multi-root Workspace
 
@@ -131,9 +129,8 @@ ral-camera-fault-paper/
 1. 新建论文仓库，初始化 IEEE RAL LaTeX 模板，记录其绝对路径
 2. 安装 VSCode 扩展：LaTeX Workshop
 3. 创建 `.code-workspace` 文件
-4. 将示范 PDF 放入 `example_papers/`，并将该目录加入 `.gitignore`
+4. 创建 `example_papers.txt`，每行一个示范论文的 arXiv 链接或 DOI（如 `https://arxiv.org/abs/2301.12345` 或 `10.1109/LRA.2023.1234567`）
 5. 在 `~/.claude/agents/` 下创建 6 个 agent 配置文件，**在每个文件中硬编码两个仓库的绝对路径**
-6. 在论文仓库中安装 `pdftotext`（`poppler-utils` 包），供 `style-analyzer` 使用
 
 ### Phase 1：启动阶段（并行）
 
@@ -145,9 +142,10 @@ ral-camera-fault-paper/
   - 实验配置和超参数
   - 输出 `context/code_summary.md`
 - `style-analyzer`：
-  1. 用 `pdftotext` 将 `example_papers/*.pdf` 转为 `.txt`
-  2. 读取文本，提取写作风格特征
-  3. 输出 `context/style_guide.md`（格式见第 8 节）
+  1. 读取 `example_papers.txt` 中的 arXiv 链接或 DOI
+  2. 用 WebFetch 工具逐个获取论文全文（arXiv 提供 HTML 版本，DOI 可通过 Semantic Scholar API 获取摘要和部分内容）
+  3. 提取写作风格特征
+  4. 输出 `context/style_guide.md`（格式见第 8 节）
 
 两者完成后，`paper-director` 向用户汇报分析结果。
 
