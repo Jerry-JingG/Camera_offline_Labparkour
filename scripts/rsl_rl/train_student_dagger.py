@@ -259,7 +259,7 @@ def main():
     # 4. Initialize Student Model
     fusion_cfg = {"num_layers": 2, "num_heads": 4, "mlp_ratio": 2.0, "dropout": 0.1, "grid_size": 4}
     temporal_cfg = {"num_layers": 3, "num_heads": 4, "d_inner": 256, "mem_len": 64, "dropout": 0.1}
-    action_head_cfg = {"hidden_dims": (256, 256), "tanh_output": False, "action_scale": 1.0}
+    action_head_cfg = {"hidden_dims": (128, 64), "tanh_output": False, "action_scale": 1.0}
 
     student_model = MultiModalStudentPolicy(
         proprio_dim=proprio_dim,
@@ -334,7 +334,7 @@ def main():
     current_returns = torch.zeros(args.num_envs, device=device)
     current_lengths = torch.zeros(args.num_envs, device=device)
     dones_bool = torch.zeros(args.num_envs, dtype=torch.bool, device=device)  # Track prev dones
-
+    from isaaclab.utils.math  import euler_xyz_from_quat, wrap_to_pi
     try:
         # 尝试从 unwrapped 环境中获取 parkour_manager
         base_parkour = vec_env.unwrapped.parkour_manager.get_term("base_parkour")
@@ -363,8 +363,14 @@ def main():
 
             # C. Dropout
             # Create copies for student (augmented) vs teacher (clean)
+            delta_yaws = obs[:, 6:8].clone()
+            _ , _, current_yaw = euler_xyz_from_quat(base_parkour.robot.data.root_quat_w)
+            target_yaw = wrap_to_pi(base_parkour.target_yaw.clone())
+            current_yaw = current_yaw.unsqueeze(-1)
+            target_yaw = target_yaw.unsqueeze(-1)
+            extra_info = torch.cat([delta_yaws, target_yaw, current_yaw], dim=-1)
+
             student_prop = obs[:, :proprio_dim].clone()
-            extra_info = obs[:, 6:8].clone()
             student_prop[:, 6:8] = 0.0  # 消除观测中的delta_yaw与delta_next_yaw真值
             student_prop[:, 12] = dones_bool.float()
             student_depth = depth_image.clone()

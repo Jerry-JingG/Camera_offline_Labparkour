@@ -11,8 +11,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # ------------------------------- 核心训练参数 ---------------------------------
 TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Collect-v0"  # --task
 NUM_ENVS=64                                                 # --num_envs：并行环境数量
-NUM_ITERS=50000                                              # --num_iters：DAGGER 总迭代次数
-NUM_PRETRAIN_ITERS=1000                                      # --num_pretrain_iters：预热迭代，前若干迭代由 Teacher 全程驾驶
+NUM_ITERS=60000                                              # --num_iters：DAGGER 总迭代次数
+NUM_PRETRAIN_ITERS=5000                                      # --num_pretrain_iters：预热迭代，前若干迭代由 Teacher 全程驾驶
 
 SEQUENCE_LENGTH=128                                          # --sequence_length：TXL 序列长度 / mem_len
 PROP_HIST_LEN=1                                             # --prop_hist_len：ProprioEncoder 的历史步数
@@ -20,7 +20,7 @@ DEPTH_HIST_LEN=1                                            # --depth_hist_len�
 
 TEACHER_CHECKPOINT="logs/rsl_rl/unitree_go2_parkour/2026-01-28_22-35-55_try2/model_74000.pt"    # 教师 PPO 权重路径
 STUDENT_CHECKPOINT=""                                           # 可选：已有学生模型 checkpoint
-SAVE_DIR="outputs/students/train_from_dagger/xl0312_yawhead"          # 输出目录
+SAVE_DIR="outputs/students/train_from_dagger/xl0318_yawhead"          # 输出目录
 
 LEARNING_RATE=3e-4                                              # --learning_rate
 WEIGHT_DECAY=1e-4                                               # --weight_decay
@@ -29,9 +29,9 @@ GRAD_CLIP=1.0                                                   # --grad_clip
 # -------------------------- 教师-学生混合策略参数 -----------------------------
 # USE_MIXTURE=true 开启 mixture；false 关闭。beta 线性从 start 衰减到 end。
 USE_MIXTURE=true
-BETA_START=0.8
+BETA_START=1.0
 BETA_END=0.0
-BETA_DECAY_ITERS=3000
+BETA_DECAY_ITERS=10000
 
 # -------------------------- 数据增强 (Dropout) -------------------------------
 # 模拟摄像头/传感器掉线，强制学生学习鲁棒性
@@ -40,7 +40,7 @@ USE_DROPOUT=true
 # ------------------------------- 日志 / W&B 参数 -------------------------------
 USE_WANDB=true                                                 # --wandb：是否开启 W&B
 WANDB_PROJECT="camera-offline-parkour"                          # --wandb_project
-WANDB_RUN_NAME="dagger-txl-0312-yawhead"                        # --wandb_run_name
+WANDB_RUN_NAME="dagger-txl-0318-yawhead"                        # --wandb_run_name
 
 # --------------------------- AppLauncher / Isaac 参数 -------------------------
 DEVICE_ARG="cuda:0"                                             # --device

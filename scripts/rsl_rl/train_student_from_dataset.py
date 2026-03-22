@@ -74,7 +74,7 @@ class SequenceAggregator:
         sequence_len: int,
         num_prop: int = 53,
         depth_shape: Tuple[int, int] = (58, 87),
-        extra_info_dim: int = 2
+        extra_info_dim: int = 4
     ) -> None:
         self.num_envs = num_envs
         self.prop_hist_len = prop_hist_len
@@ -347,14 +347,16 @@ class MultiModalStudentPolicy(nn.Module):
         self.action_head = JointPoseActionHead(
             d_model=token_dim,
             action_dim=action_dim,
-            hidden_dims=action_head_cfg.get("hidden_dims", (256, 256)),
+            hidden_dims=action_head_cfg.get("hidden_dims", (128, 64)),
             tanh_output=action_head_cfg.get("tanh_output", False),  # 应该使用激活函数吗？教师模型tanh_encoder_output = False，会输出>1的action
             action_scale=action_head_cfg.get("action_scale", 1.0),
         )
         self.yaw_head = nn.Sequential(
-            nn.Linear(token_dim, 256),
+            nn.Linear(token_dim, 64),
             nn.ReLU(),
-            nn.Linear(256, 2)  # 输出 delta_yaw 和 delta_next_yaw
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 4)
         )
 
     def forward(self, proprio_seq: Tensor, depth_seq: Tensor) -> Tensor:
@@ -404,7 +406,8 @@ class MultiModalStudentPolicy(nn.Module):
             return_mems=True,    # Return new mems for next segment
         )
         actions = self.action_head.forward_sequence(temporal_out)["mean"]
-        predicted_yaws = self.yaw_head(temporal_out)
+        raw_yaws = self.yaw_head(temporal_out)
+        predicted_yaws = 3.15 * torch.tanh(raw_yaws)
         return actions, predicted_yaws, new_mems
 
 
@@ -471,7 +474,7 @@ def build_student_from_dataset(
         "attn_dropout": 0.1,
     }
     action_head_cfg = {
-        "hidden_dims": (256, 256),
+        "hidden_dims": (128, 64),
         "tanh_output": False,   # 教师模型tanh_encoder_output = False，会输出>1的action
         "action_scale": 1,  # 教师模型没有使用action_sacle
     }
