@@ -441,7 +441,7 @@ def parkour_beam_terrain(
             # 2. 如果启用了 roughness，对 Mesh 进行处理
             if cfg.apply_roughness:
 
-                box = box.subdivide(iterations=1, face_index=None)
+                box = box.subdivide(face_index=None)
                 noise_scale = 0.01 + 0.01 * difficulty  # 随难度增加
 
                 # 对所有顶点施加随机噪声

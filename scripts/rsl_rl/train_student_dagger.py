@@ -259,7 +259,7 @@ def main():
     # 4. Initialize Student Model
     fusion_cfg = {"num_layers": 2, "num_heads": 4, "mlp_ratio": 2.0, "dropout": 0.1, "grid_size": 4}
     temporal_cfg = {"num_layers": 3, "num_heads": 4, "d_inner": 256, "mem_len": 64, "dropout": 0.1}
-    action_head_cfg = {"hidden_dims": (128, 64), "tanh_output": False, "action_scale": 1.0}
+    action_head_cfg = {"hidden_dims": (256, 256), "tanh_output": False, "action_scale": 1.0}
 
     student_model = MultiModalStudentPolicy(
         proprio_dim=proprio_dim,
@@ -270,9 +270,11 @@ def main():
         fusion_cfg=fusion_cfg,
         temporal_cfg=temporal_cfg,
         action_head_cfg=action_head_cfg,
+        token_dim=128
     ).to(device)
 
     optimizer = torch.optim.AdamW(student_model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_iters, eta_min=1e-4)
 
     # Load checkpoint if provided
     start_iter = 0
@@ -284,6 +286,8 @@ def main():
         if "optimizer_state_dict" in ckpt and ckpt.get("meta", {}).get("is_dagger", False):
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             start_iter = ckpt.get("iter", 0)
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
 
     # 5. Initialize Helpers
     # Aggregator: Collects (obs, teacher_action, done) for TRAINING
@@ -334,17 +338,12 @@ def main():
     current_returns = torch.zeros(args.num_envs, device=device)
     current_lengths = torch.zeros(args.num_envs, device=device)
     dones_bool = torch.zeros(args.num_envs, dtype=torch.bool, device=device)  # Track prev dones
-    from isaaclab.utils.math  import euler_xyz_from_quat, wrap_to_pi
-    try:
-        # 尝试从 unwrapped 环境中获取 parkour_manager
-        base_parkour = vec_env.unwrapped.parkour_manager.get_term("base_parkour")
-        num_goals = int(getattr(base_parkour, "num_goals", 0))
-    except Exception:
-        base_parkour = None
-        num_goals = 0
-        print("[Warning] Could not get parkour_manager. Track progress logging disabled.")
+
+    base_parkour = vec_env.unwrapped.parkour_manager.get_term("base_parkour")
+    num_goals = int(getattr(base_parkour, "num_goals", 0))
 
     print(f"[Info] Starting DAgger loop for {args.num_iters} iterations...")
+    from isaaclab.utils.math  import euler_xyz_from_quat, wrap_to_pi
     for it in range(start_iter, args.num_iters):
         iter_start = time.time()
         student_model.eval()  # Eval mode for rollout
@@ -363,15 +362,13 @@ def main():
 
             # C. Dropout
             # Create copies for student (augmented) vs teacher (clean)
-            delta_yaws = obs[:, 6:8].clone()
-            _ , _, current_yaw = euler_xyz_from_quat(base_parkour.robot.data.root_quat_w)
-            target_yaw = wrap_to_pi(base_parkour.target_yaw.clone())
-            current_yaw = current_yaw.unsqueeze(-1)
-            target_yaw = target_yaw.unsqueeze(-1)
-            extra_info = torch.cat([delta_yaws, target_yaw, current_yaw], dim=-1)
-
             student_prop = obs[:, :proprio_dim].clone()
-            student_prop[:, 6:8] = 0.0  # 消除观测中的delta_yaw与delta_next_yaw真值
+            _ , _, yaw = euler_xyz_from_quat(base_parkour.robot.data.root_quat_w)
+            current_yaw = wrap_to_pi(yaw)
+            student_prop[:, 6] = -current_yaw
+            student_prop[:, 7] = -current_yaw
+            extra_info = torch.cat([base_parkour.target_yaw.clone().unsqueeze(-1), base_parkour.next_target_yaw.clone().unsqueeze(-1)], dim=-1)
+
             student_prop[:, 12] = dones_bool.float()
             student_depth = depth_image.clone()
 
@@ -463,6 +460,7 @@ def main():
         if args.grad_clip > 0:
             nn.utils.clip_grad_norm_(student_model.parameters(), args.grad_clip)
         optimizer.step()
+        scheduler.step()
 
         # Update train_mems for next iteration
         if new_train_mems is not None:
@@ -535,6 +533,7 @@ def main():
             torch.save({
                 "model_state_dict": student_model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
                 "iter": it + 1,
                 "meta": {
                     "is_dagger": True,

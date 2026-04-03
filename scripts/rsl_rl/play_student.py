@@ -329,12 +329,17 @@ def main() -> None:
     obs, extras = vec_env.get_observations()
     dones_bool = torch.zeros(vec_env.num_envs, device=device, dtype=torch.bool)
     step = 0
+    
+    from isaaclab.utils.math  import euler_xyz_from_quat, wrap_to_pi
     while simulation_app.is_running() and step < args.max_steps:
         depth_image = extras["observations"].get("depth_camera")
         if depth_image is None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
         obs_prop = obs[:, :proprio_dim]
-        obs_prop[:, 6:8] = 0.0
+        _ , _, yaw = euler_xyz_from_quat(base_parkour.robot.data.root_quat_w)
+        current_yaw = wrap_to_pi(yaw)
+        obs_prop[:, 6] = -current_yaw
+        obs_prop[:, 7] = -current_yaw
         obs_prop[:, 12] = dones_bool.float()
 
         if dropout_manager:

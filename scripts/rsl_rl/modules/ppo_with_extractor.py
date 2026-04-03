@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import torch
@@ -37,6 +36,7 @@ class PPOWithExtractor(PPO):
         # Distributed training parameters
         priv_reg_coef_schedual = [0, 0, 0],
         multi_gpu_cfg: dict | None = None,
+        **kwargs,
     ):
         super().__init__(
             policy, 
