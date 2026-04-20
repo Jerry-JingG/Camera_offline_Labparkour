@@ -30,7 +30,7 @@ class CameraDropoutManager:
         self.offline_duration_range = offline_duration_range
 
         self.prop_vulnerable_indices = torch.cat([
-            torch.arange(0, 5, device=self.device),    # Ang Vel + IMU
+            torch.arange(0, 8, device=self.device),    # Ang Vel + IMU
             torch.arange(13, 37, device=self.device),  # Joint Pos + Joint Vel
             torch.arange(49, 53, device=self.device)   # Contacts
         ]).long()

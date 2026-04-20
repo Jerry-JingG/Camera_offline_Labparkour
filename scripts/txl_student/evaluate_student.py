@@ -28,24 +28,23 @@ from isaaclab.app import AppLauncher
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
 PARKOUR_TASKS_ROOT = os.path.join(PROJECT_ROOT, "parkour_tasks")
 if PARKOUR_TASKS_ROOT not in sys.path:
     sys.path.insert(0, PARKOUR_TASKS_ROOT)
 
+RSL_RL_DIR = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl")
+if RSL_RL_DIR not in sys.path:
+    sys.path.insert(0, RSL_RL_DIR)
+
 import cli_args  # isort: skip
 
 # Load MultiModalStudentPolicy directly
-TRAIN_STUDENT_PATH = Path(__file__).resolve().parent / "train_student_from_dataset.py"
-_spec = importlib.util.spec_from_file_location("train_student_from_dataset", TRAIN_STUDENT_PATH)
-if _spec is None or _spec.loader is None:
-    raise ImportError(f"Unable to load MultiModalStudentPolicy from {TRAIN_STUDENT_PATH}")
-_module = importlib.util.module_from_spec(_spec)
-# Register into sys.modules before execution so dataclasses can resolve module references.
-sys.modules[_spec.name] = _module
-_spec.loader.exec_module(_module)
-MultiModalStudentPolicy = _module.MultiModalStudentPolicy
-
-from play_student import find_latest_student_checkpoint, load_student_policy_for_play, StudentOnlineRunner
+from utils.student_utils import (
+    find_latest_student_checkpoint,
+    load_student_policy_for_play,
+    StudentOnlineRunner
+)
 
 
 def parse_args_eval() -> argparse.Namespace:
@@ -127,6 +126,7 @@ def main() -> None:
         depth_hist_len=args.depth_hist_len,
         device=device,
         mem_len=args.mem_len,
+        token_dim=128
     )
     proprio_dim = int(meta["num_prop"])
     camera_resolution = tuple(meta.get("camera_resolution", (58, 87)))
@@ -208,7 +208,7 @@ def main() -> None:
         _ , _, yaw = euler_xyz_from_quat(base_parkour.robot.data.root_quat_w)
         current_yaw = wrap_to_pi(yaw)
         obs_prop[:, 6] = -current_yaw
-        obs_prop[:, 7] = -current_yaw
+        obs_prop[:, 7] = 0
         obs_prop[:, 12] = dones_bool.float()
 
         if dropout_manager:

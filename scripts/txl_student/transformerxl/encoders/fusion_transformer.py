@@ -230,8 +230,8 @@ class MultiModalFusionTransformer(nn.Module):
 if __name__ == "__main__":
     torch.manual_seed(0)
     try:
-        from modules.tokenizers.proprio_encoder import ProprioEncoder  # type: ignore
-        from modules.tokenizers.depth_encoder import DepthEncoder  # type: ignore
+        from transformerxl.tokenizers.proprio_encoder import ProprioEncoder  # type: ignore
+        from transformerxl.tokenizers.depth_encoder import DepthEncoder  # type: ignore
     except ModuleNotFoundError:
         from proprio_encoder import ProprioEncoder  # type: ignore
         from depth_encoder import DepthEncoder  # type: ignore

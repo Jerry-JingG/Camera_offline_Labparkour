@@ -54,6 +54,10 @@ PARKOUR_TASKS_ROOT = os.path.join(PROJECT_ROOT, "parkour_tasks")
 if PARKOUR_TASKS_ROOT not in sys.path:
     sys.path.insert(0, PARKOUR_TASKS_ROOT)
 
+RSL_RL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "rsl_rl"))
+if RSL_RL_DIR not in sys.path:
+    sys.path.insert(0, RSL_RL_DIR)
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     """构建命令行解析器，兼顾 RSL-RL 与 AppLauncher 的公共参数。"""
@@ -396,6 +400,9 @@ def main():  # noqa: C901
     noise_scale = 0.2
 
     dones_bool = torch.zeros(vec_env.num_envs, device=vec_env.device, dtype=torch.bool)
+    base_parkour = vec_env.unwrapped.parkour_manager.get_term("base_parkour")
+    from isaaclab.utils.math  import euler_xyz_from_quat, wrap_to_pi
+
     with torch.inference_mode():
         while total_iterations < total_steps:
             depth_image = extras["observations"].get("depth_camera")
@@ -456,11 +463,17 @@ def main():  # noqa: C901
             priv_est = estimator(obs_est[:, :num_prop])
             obs_est[:, priv_start:priv_end] = priv_est
 
+            _ , _, yaw = euler_xyz_from_quat(base_parkour.robot.data.root_quat_w)
+            current_yaw = wrap_to_pi(yaw)
+            obs_prop[:, 6] = -current_yaw
+            obs_prop[:, 7] = 0
+            obs_prop[:, 12] = dones_bool.float()
+            extra_info = torch.cat([base_parkour.target_yaw.clone().unsqueeze(-1), base_parkour.next_target_yaw.clone().unsqueeze(-1)], dim=-1)
+
             if args_cli.use_dropout:
                 dropout_manager.reset_env(dones_bool)
                 dropout_manager.update(depth_image=depth_image, obs_prop=obs_prop)
 
-            obs_prop[:, 12] = dones_bool.float()
             obs_prop_cpu = obs_prop.detach().cpu().numpy().astype(np.float32)
 
             actions = policy(obs_est, hist_encoding=True)
@@ -488,6 +501,7 @@ def main():  # noqa: C901
             buffer["episode_id"].append(episode_ids.detach().cpu().numpy())
             buffer["step_in_episode"].append(step_in_episode.detach().cpu().numpy())
             buffer["depth"].append(convert_depth(depth_image, args_cli.depth_dtype, args_cli.depth_scale))
+            buffer["extra_info"].append(extra_info.cpu().numpy())
             buffer["priv_estimate"].append(priv_est.detach().cpu().numpy().astype(np.float32))
 
             obs_stats.update(obs_prop_cpu)

@@ -84,7 +84,7 @@ else
 fi
 
 # ------------------------------- 构建命令行 -------------------------------------
-COLLECT_CMD=("${PYTHON_BIN}" "scripts/rsl_rl/collect.py"
+COLLECT_CMD=("${PYTHON_BIN}" "scripts/txl_student/collect.py"
     "--task" "${TASK_ID}"
     "--num_envs" "${NUM_ENVS}"
     "--total_steps" "${TOTAL_STEPS}"

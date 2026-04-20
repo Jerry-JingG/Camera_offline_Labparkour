@@ -31,152 +31,19 @@ PARKOUR_TASKS_ROOT = os.path.join(PROJECT_ROOT, "parkour_tasks")
 if PARKOUR_TASKS_ROOT not in sys.path:
     sys.path.insert(0, PARKOUR_TASKS_ROOT)
 
+RSL_RL_DIR = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl")
+if RSL_RL_DIR not in sys.path:
+    sys.path.insert(0, RSL_RL_DIR)
+
 # === Import aggregator and student policy (same directory) ===
-from train_student_from_dataset import SequenceAggregator, MultiModalStudentPolicy, TransformerXLTemporal
-
-
-# ====== Isaac Lab / task loading (same as collect.py) ======
-def load_env_and_teacher(args):
-    # 必须先实例化 AppLauncher / SimulationApp，再导入依赖 Omniverse 的模块
-    from isaaclab.app import AppLauncher
-
-    app_launcher = AppLauncher(args)
-    simulation_app = app_launcher.app
-
-    import gymnasium as gym
-    # 触发 parkour_tasks 中 Gym 环境注册（包括 TeacherCam 任务）
-    import parkour_tasks  # noqa: F401
-    from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
-    from isaaclab_tasks.utils import parse_env_cfg
-    import cli_args
-    from modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
-    from vecenv_wrapper import ParkourRslRlVecEnvWrapper
-
-    # 与 collect.py 保持一致：从 CLI 中读取 device / disable_fabric 参数
-    device_cli = getattr(args, "device", None)
-    disable_fabric = getattr(args, "disable_fabric", False)
-    env_cfg = parse_env_cfg(
-        args.task,
-        device=device_cli,
-        num_envs=args.num_envs,
-        use_fabric=not disable_fabric,
-    )
-
-    agent_cfg = cli_args.parse_rsl_rl_cfg(args.task, args)
-
-    env = gym.make(args.task, cfg=env_cfg)
-    if isinstance(env.unwrapped, DirectMARLEnv):
-        env = multi_agent_to_single_agent(env)
-
-    vec_env = ParkourRslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-
-    # Load teacher (same as collect.py)
-    runner = OnPolicyRunnerWithExtractor(vec_env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    runner.load(args.teacher_checkpoint, load_optimizer=False)
-    teacher_policy = runner.get_inference_policy(device=vec_env.device)
-
-    return vec_env, teacher_policy, agent_cfg, simulation_app
-
-
-class StudentOnlineRunner:
-    """
-    Vectorized Student Runner with TransformerXL Memory.
-
-    This version:
-    1. Uses tensors for history buffers (no deques/loops).
-    2. Uses Batched Mems (List[Tensor]) instead of List[List[Tensor]].
-    3. Directly calls model.forward_with_mems.
-    """
-
-    def __init__(
-        self,
-        model: MultiModalStudentPolicy,
-        num_envs: int,
-        proprio_dim: int,
-        prop_hist_len: int,
-        depth_hist_len: int,
-        camera_resolution: Tuple[int, int],
-        device: torch.device,
-    ) -> None:
-        self.model = model
-        self.num_envs = num_envs
-        self.prop_hist_len = prop_hist_len
-        self.depth_hist_len = depth_hist_len
-        self.device = device
-
-        # History Buffer: 行为类似deque, 不过现在使用np.roll实现
-        self.prop_histories = torch.zeros(
-            num_envs, prop_hist_len, proprio_dim,
-            dtype=torch.float32, device=device
-        )
-        self.depth_histories = torch.zeros(
-            num_envs, depth_hist_len, *camera_resolution,
-            dtype=torch.float32, device=device
-        )
-
-        # TransformerXL Memory, Shape: List[Tensor], where each Tensor is [Num_Envs, Mem_Len, D_Model]
-        self.mems: Optional[List[torch.Tensor]] = None
-
-    def reset(self) -> None:
-        """Reset all environments."""
-        self.prop_histories.zero_()
-        self.depth_histories.zero_()
-        # Directly set to None. TransformerXLTemporal handles it automatically.
-        self.mems = None
-
-    def reset_done(self, done_mask: torch.Tensor) -> None:
-        """
-        Reset histories and memories for done environments.
-        Args:
-            done_mask: Boolean tensor of shape [num_envs]
-        """
-        if not done_mask.any():
-            return
-
-        self.prop_histories[done_mask] = 0
-        self.depth_histories[done_mask] = 0
-
-        if self.mems is not None:
-            for i in range(len(self.mems)):
-                self.mems[i][done_mask] = 0
-
-    def act(
-        self,
-        obs_prop: torch.Tensor,     # [num_envs, proprio_dim]
-        depth_image: torch.Tensor,  # [num_envs, H, W] or [num_envs, 1, H, W]
-    ) -> torch.Tensor:
-        """
-        Perform one inference step using cached memory.
-        """
-        obs_prop = obs_prop.to(self.device)
-        depth_image = depth_image.to(self.device)
-
-        if depth_image.dim() == 4 and depth_image.shape[1] == 1:
-            depth_image = depth_image.squeeze(1)
-
-        self.prop_histories = torch.roll(self.prop_histories, -1, dims=1)
-        self.depth_histories = torch.roll(self.depth_histories, -1, dims=1)
-
-        self.prop_histories[:, -1, :] = obs_prop
-        self.depth_histories[:, -1, :, :] = depth_image
-
-        # Prepare inputs for the model
-        # 1. Flatten proprio history: [B, Hist, Dim] -> [B, Hist*Dim]
-        # 2. Add Sequence dimension S=1: [B, S=1, Features]
-        prop_input = self.prop_histories.view(self.num_envs, -1).unsqueeze(1)
-
-        # Depth Input: [B, S=1, Hist, H, W]
-        depth_input = self.depth_histories.unsqueeze(1)
-
-        # [Answer 4] Direct Model Call
-        with torch.no_grad():
-            actions, _, self.mems = self.model.forward_with_mems(
-                prop_input,
-                depth_input,
-                mems=self.mems
-            )
-
-        return actions.squeeze(1)  # Remove Sequence dim -> [B, Action_Dim]
+from transformerxl.student_policy import MultiModalStudentPolicy
+from transformerxl.temporal.txl import TransformerXLTemporal
+from utils.student_utils import (
+    SequenceAggregator,
+    StudentOnlineRunner,
+    build_student_model,
+    load_env_and_teacher
+)
 
 
 def parse_args():
@@ -257,22 +124,15 @@ def main():
     print(f"[Info] Prop Dim: {proprio_dim}, Action Dim: {action_dim}, Cam Res: {camera_resolution}")
 
     # 4. Initialize Student Model
-    fusion_cfg = {"num_layers": 2, "num_heads": 4, "mlp_ratio": 2.0, "dropout": 0.1, "grid_size": 4}
-    temporal_cfg = {"num_layers": 3, "num_heads": 4, "d_inner": 256, "mem_len": 64, "dropout": 0.1}
-    action_head_cfg = {"hidden_dims": (256, 256), "tanh_output": False, "action_scale": 1.0}
-
-    student_model = MultiModalStudentPolicy(
+    student_model = build_student_model(
         proprio_dim=proprio_dim,
         action_dim=action_dim,
         camera_resolution=camera_resolution,
         prop_hist_len=args.prop_hist_len,
         depth_hist_len=args.depth_hist_len,
-        fusion_cfg=fusion_cfg,
-        temporal_cfg=temporal_cfg,
-        action_head_cfg=action_head_cfg,
+        mem_len=args.sequence_length,
         token_dim=128
     ).to(device)
-
     optimizer = torch.optim.AdamW(student_model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_iters, eta_min=1e-4)
 
@@ -293,6 +153,7 @@ def main():
     # Aggregator: Collects (obs, teacher_action, done) for TRAINING
     aggregator = SequenceAggregator(
         num_envs=args.num_envs,
+        device=device,
         prop_hist_len=args.prop_hist_len,
         depth_hist_len=args.depth_hist_len,
         sequence_len=args.sequence_length,
@@ -366,7 +227,7 @@ def main():
             _ , _, yaw = euler_xyz_from_quat(base_parkour.robot.data.root_quat_w)
             current_yaw = wrap_to_pi(yaw)
             student_prop[:, 6] = -current_yaw
-            student_prop[:, 7] = -current_yaw
+            student_prop[:, 7] = 0
             extra_info = torch.cat([base_parkour.target_yaw.clone().unsqueeze(-1), base_parkour.next_target_yaw.clone().unsqueeze(-1)], dim=-1)
 
             student_prop[:, 12] = dones_bool.float()
@@ -404,11 +265,11 @@ def main():
 
             # G. Store in Aggregator
             batch_data = aggregator.push_step(
-                obs_prop=student_prop.cpu().numpy(),
-                depth_frame=student_depth.cpu().numpy(),
-                teacher_actions=teacher_actions.cpu().numpy(),
-                done=dones_bool.cpu().numpy(),
-                extra_info=extra_info.cpu().numpy()
+                obs_prop=student_prop,
+                depth_frame=student_depth,
+                teacher_actions=teacher_actions,
+                done=dones_bool,
+                extra_info=extra_info
             )
 
             # H. Handle Resets for Inference Runner
@@ -460,7 +321,7 @@ def main():
         if args.grad_clip > 0:
             nn.utils.clip_grad_norm_(student_model.parameters(), args.grad_clip)
         optimizer.step()
-        scheduler.step()
+        #scheduler.step()
 
         # Update train_mems for next iteration
         if new_train_mems is not None:

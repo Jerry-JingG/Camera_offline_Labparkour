@@ -23,11 +23,11 @@ def _ensure_modules_on_path() -> None:
 
 _ensure_modules_on_path()
 
-from modules.encoders.fusion_transformer import MultiModalFusionTransformer
-from modules.actionheads.joint_action_head import JointPoseActionHead
-from modules.temperal.txl import TransformerXLTemporal
-from modules.tokenizers.depth_encoder import DepthEncoder
-from modules.tokenizers.proprio_encoder import ProprioEncoder
+from transformerxl.encoders.fusion_transformer import MultiModalFusionTransformer
+from transformerxl.actionheads.joint_action_head import JointPoseActionHead
+from transformerxl.temporal.txl import TransformerXLTemporal
+from transformerxl.tokenizers.depth_encoder import DepthEncoder
+from transformerxl.tokenizers.proprio_encoder import ProprioEncoder
 
 import time
 

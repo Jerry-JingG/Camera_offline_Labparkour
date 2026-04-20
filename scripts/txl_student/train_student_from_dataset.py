@@ -34,140 +34,8 @@ except ImportError:
     print("[warning] wandb not installed. Run `pip install wandb` to enable logging.")
 
 from utils.dropout_manager import CameraDropoutManager
-
-# Ensure repo roots are importable
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-MODULES_ROOT = Path(PROJECT_ROOT) / "parkour_tasks" / "parkour_tasks" / "extreme_parkour_task" / "modules"
-
-
-def load_symbol(module_path: Path, symbol: str):
-    spec = importlib.util.spec_from_file_location(f"student_policy.{symbol}", module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Unable to load module from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    if not hasattr(module, symbol):
-        raise AttributeError(f"{module_path} does not define {symbol}")
-    return getattr(module, symbol)
-
-
-JointPoseActionHead = load_symbol(MODULES_ROOT / "actionheads" / "joint_action_head.py", "JointPoseActionHead")
-MultiModalFusionTransformer = load_symbol(
-    MODULES_ROOT / "encoders" / "fusion_transformer.py", "MultiModalFusionTransformer"
-)
-TransformerXLTemporal = load_symbol(MODULES_ROOT / "temperal" / "txl.py", "TransformerXLTemporal")
-DepthEncoder = load_symbol(MODULES_ROOT / "tokenizers" / "depth_encoder.py", "DepthEncoder")
-ProprioEncoder = load_symbol(MODULES_ROOT / "tokenizers" / "proprio_encoder.py", "ProprioEncoder")
-
-
-class SequenceAggregator:
-    """
-    prop_histories和depth_histories用于聚合fusion transformer需要的聚合历史输入
-    我对prop_histories和depth_histories初始化时进行了填零操作, 这样第一个环境步transformerxl就可以输出action
-    seq_prop[i]存储了第i个环境的感知观测序列
-    """
-    def __init__(
-        self,
-        num_envs: int,
-        prop_hist_len: int,
-        depth_hist_len: int,
-        sequence_len: int,
-        num_prop: int = 53,
-        depth_shape: Tuple[int, int] = (58, 87),
-        extra_info_dim: int = 2
-    ) -> None:
-        self.num_envs = num_envs
-        self.prop_hist_len = prop_hist_len
-        self.depth_hist_len = depth_hist_len
-        self.sequence_len = sequence_len
-        self.num_prop = num_prop
-
-        # 1. History Buffer: 行为类似deque, 不过现在使用np.roll实现
-        self.prop_histories = torch.zeros((num_envs, prop_hist_len, num_prop), dtype=torch.float32)
-        self.depth_histories = torch.zeros((num_envs, depth_hist_len, *depth_shape), dtype=torch.float32)
-
-        # 2. Sequence Buffer: 预分配内存，用于存储一个完整的 Sequence Batch
-        self.seq_prop = torch.zeros((num_envs, sequence_len, prop_hist_len * num_prop), dtype=torch.float32)
-        self.seq_depth = torch.zeros((num_envs, sequence_len, depth_hist_len, *depth_shape), dtype=torch.float32)
-
-        self.seq_action = None
-        self.seq_done = torch.zeros((num_envs, sequence_len), dtype=torch.bool)
-        self.seq_info = torch.zeros((num_envs, sequence_len, extra_info_dim), dtype=torch.float32)
-
-        self.current_seq_step = 0
-
-    def reset(self) -> None:
-        self.prop_histories.zero_()
-        self.depth_histories.zero_()
-
-        self.seq_prop.zero_()
-        self.seq_depth.zero_()
-        self.seq_action = None
-        self.seq_done.zero_()
-        self.seq_info.zero_()
-
-        self.current_seq_step = 0
-
-    def push_step(self, obs_prop: np.ndarray, depth_frame: np.ndarray, teacher_actions: np.ndarray, done: np.ndarray, extra_info: np.ndarray):
-        """
-        接收 Numpy 数据，转为 Tensor 并更新历史 buffer 和 sequence buffer。
-        """
-        # --- 0. 转换为 Tensor ---
-        obs_prop_t = torch.from_numpy(obs_prop)
-        depth_frame_t = torch.from_numpy(depth_frame)
-        teacher_actions_t = torch.from_numpy(teacher_actions)
-        done_t = torch.from_numpy(done)
-        extra_info_t = torch.from_numpy(extra_info)
-
-        # --- 1. 更新历史 (整体左移) ---
-        self.prop_histories = torch.roll(self.prop_histories, -1, dims=1)
-        self.depth_histories = torch.roll(self.depth_histories, -1, dims=1)
-
-        # 填入最新数据
-        self.prop_histories[:, -1, :] = obs_prop_t
-        self.depth_histories[:, -1, :, :] = depth_frame_t
-
-        # --- 2. 填入 Sequence Buffer ---
-        idx = self.current_seq_step
-
-        # Lazy Init for actions
-        if self.seq_action is None:
-            action_dim = teacher_actions.shape[-1]
-            self.seq_action = torch.zeros((self.num_envs, self.sequence_len, action_dim), dtype=torch.float32)
-
-        # Flatten Proprio: [Num_Envs, Hist_Len, num_prop] -> [Num_Envs, Hist_Len * num_prop]
-        current_prop_flat = self.prop_histories.reshape(self.num_envs, -1)
-
-        self.seq_prop[:, idx] = current_prop_flat
-        self.seq_depth[:, idx] = self.depth_histories
-        self.seq_action[:, idx] = teacher_actions_t
-        self.seq_done[:, idx] = done_t
-        self.seq_info[:, idx] = extra_info_t
-
-        # --- 3. 处理 Done (批量清零) ---
-        if done_t.any():
-            """ 对于done掉的环境, 不能将它们的seq_buffer置0,因为transformer网络在训练时是sequencely output的!!! """
-            self.prop_histories[done_t] = 0.0
-            self.depth_histories[done_t] = 0.0
-
-        # --- 4. 检查 Batch 是否完成 ---
-        self.current_seq_step += 1
-        if self.current_seq_step == self.sequence_len:
-            batch = self._pack_batch()
-            self.current_seq_step = 0
-            return batch
-
-        return None
-
-    def _pack_batch(self):
-        # 返回 Tensor 副本，防止下一轮循环修改 buffer 影响 dataloader 队列
-        return {
-            "proprio": self.seq_prop.clone(),
-            "depth": self.seq_depth.clone(),
-            "actions": self.seq_action.clone(),
-            "dones": self.seq_done.clone(),
-            "extra_infos": self.seq_info.clone()
-        }
+from transformerxl.student_policy import MultiModalStudentPolicy
+from utils.student_utils import SequenceAggregator, build_student_model
 
 
 class TeacherDatasetStreamer:
@@ -181,7 +49,8 @@ class TeacherDatasetStreamer:
         sequence_len: int,
         prop_hist_len: int,
         depth_hist_len: int,
-        use_dropout: bool = False,
+        device: torch.device,
+        use_dropout: bool = False
     ) -> None:
         self.dataset_dir = dataset_dir
         self.meta = self._load_meta(dataset_dir)
@@ -196,8 +65,10 @@ class TeacherDatasetStreamer:
         self.shards: List[Path] = sorted(shards_root.glob("shard_*.npz"))
         if not self.shards:
             raise FileNotFoundError(f"No dataset shards found in {shards_root}")
+        self.device = device
         self.aggregator = SequenceAggregator(
             num_envs=self.num_envs,
+            device=self.device,
             prop_hist_len=prop_hist_len,
             depth_hist_len=depth_hist_len,
             sequence_len=sequence_len,
@@ -208,10 +79,9 @@ class TeacherDatasetStreamer:
         if use_dropout:
             print("[Streamer] Training-time Camera Dropout Augmentation: ENABLED")
             dt = float(self.meta.get("step_dt", 0.02))
-            # 我们使用 CPU 版本的 tensor 进行增强，因为 dataloader 运行在 CPU 上
             self.dropout_manager = CameraDropoutManager(
                 num_envs=self.num_envs,
-                device=torch.device("cpu"),
+                device=self.device,
                 dt=dt,
                 prob_start_offline=0.0,
                 online_duration_range=(2.0, 20.0),
@@ -233,41 +103,43 @@ class TeacherDatasetStreamer:
         self.aggregator.reset()
         batches_yielded = 0
 
-        prev_dones = torch.zeros(self.num_envs, dtype=torch.bool)
+        prev_dones = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         for shard_path in self.shards:
             with np.load(shard_path, allow_pickle=False) as shard:
                 obs_prop = shard["obs_prop"].astype(np.float32)
                 actions = shard["action_teacher"].astype(np.float32)
                 dones = shard["done"].astype(bool)
                 depth = shard["depth"]
+                extra_infos = shard["extra_info"].astype(np.float32)
                 num_steps = obs_prop.shape[0]
 
                 for step_idx in range(num_steps):
                     current_obs_prop = obs_prop[step_idx]
                     depth_frame = self._convert_depth(depth[step_idx])
 
-                    extra_info = current_obs_prop[:, 6:8].copy()
-                    current_obs_prop[:, 6:8] = 0.0
-                    current_obs_prop[:, 12] = prev_dones.numpy().astype(np.float32)
+                    extra_info = extra_infos[step_idx]
 
+                    # --- 提前转换为 Tensor ---
+                    current_obs_prop_t = torch.from_numpy(current_obs_prop).to(self.device)
+                    depth_frame_t = torch.from_numpy(depth_frame).to(self.device)
+                    actions_t = torch.from_numpy(actions[step_idx]).to(self.device)
+                    dones_t = torch.from_numpy(dones[step_idx].reshape(-1)).to(self.device)
+                    extra_info_t = torch.from_numpy(extra_info).to(self.device)
+
+                    # --- dropout 操作直接操作 Tensor ---
                     if self.dropout_manager is not None:
                         self.dropout_manager.reset_env(prev_dones)
-                        depth_tensor = torch.from_numpy(depth_frame)
-                        prop_tensor = torch.from_numpy(current_obs_prop)
+                        self.dropout_manager.update(depth_image=depth_frame_t, obs_prop=current_obs_prop_t)
 
-                        self.dropout_manager.update(depth_image=depth_tensor, obs_prop=prop_tensor)
-                        depth_frame = depth_tensor.numpy()
-                        current_obs_prop = prop_tensor.numpy()
+                    prev_dones = dones_t.clone()
 
-                    prev_dones = torch.from_numpy(dones[step_idx].reshape(-1))
-
-                    # Push step and check if a batch is ready
+                    # Push step and check if a batch is ready (传入 Tensor)
                     batch_data = self.aggregator.push_step(
-                        obs_prop=current_obs_prop,
-                        depth_frame=depth_frame,
-                        teacher_actions=actions[step_idx],
-                        done=dones[step_idx].reshape(-1),
-                        extra_info=extra_info
+                        obs_prop=current_obs_prop_t,
+                        depth_frame=depth_frame_t,
+                        teacher_actions=actions_t,
+                        done=dones_t,
+                        extra_info=extra_info_t
                     )
 
                     if batch_data is not None:
@@ -286,129 +158,6 @@ class TeacherDatasetStreamer:
         else:
             depth_np = depth_np.astype(np.float32)
         return depth_np
-
-
-class MultiModalStudentPolicy(nn.Module):
-    """Full student policy combining tokenizers, fusion transformer, temporal TXL, and action head."""
-
-    def __init__(
-        self,
-        proprio_dim: int,
-        action_dim: int,
-        camera_resolution: Tuple[int, int],
-        prop_hist_len: int,
-        depth_hist_len: int,
-        fusion_cfg: Dict[str, object],
-        temporal_cfg: Dict[str, object],
-        action_head_cfg: Dict[str, object],
-        token_dim: int = 128,
-    ) -> None:
-        super().__init__()
-        self.prop_hist_len = prop_hist_len
-        self.depth_hist_len = depth_hist_len
-        height, width = camera_resolution
-
-        self.proprio_encoder = ProprioEncoder(
-            state_dim=proprio_dim,
-            hist_len=prop_hist_len,
-            token_dim=token_dim,
-            hidden_dims=fusion_cfg.get("prop_hidden_dims", (256, 256)),
-            dropout=fusion_cfg.get("prop_dropout", 0.1),
-        )
-        self.depth_encoder = DepthEncoder(
-            in_frames=depth_hist_len,
-            in_size=max(height, width),
-            token_dim=token_dim,
-            grid_size=fusion_cfg.get("grid_size", 4),
-            dropout=fusion_cfg.get("depth_dropout", 0.1),
-        )
-        self.fusion_transformer = MultiModalFusionTransformer(
-            token_dim=token_dim,
-            num_layers=fusion_cfg.get("num_layers", 2),
-            num_heads=fusion_cfg.get("num_heads", 4),
-            mlp_ratio=fusion_cfg.get("mlp_ratio", 2.0),
-            dropout=fusion_cfg.get("dropout", 0.1),
-            attn_dropout=fusion_cfg.get("attn_dropout", 0.1),
-            add_modality_embed=True,
-            norm_first=True,
-        )
-        self.temporal_model = TransformerXLTemporal(
-            d_model=token_dim,
-            n_layer=temporal_cfg.get("num_layers", 3),
-            n_head=temporal_cfg.get("num_heads", 4),
-            d_inner=temporal_cfg.get("d_inner", 256),
-            mem_len=temporal_cfg.get("mem_len", 64),
-            dropout=temporal_cfg.get("dropout", 0.1),
-            attn_dropout=temporal_cfg.get("attn_dropout", 0.1),
-            norm_first=temporal_cfg.get("norm_first", True),
-            clamp_len=temporal_cfg.get("clamp_len", None),
-            use_rel_pos=temporal_cfg.get("use_rel_pos", True),
-        )
-        self.action_head = JointPoseActionHead(
-            d_model=token_dim,
-            action_dim=action_dim,
-            hidden_dims=action_head_cfg.get("hidden_dims", (256, 256)),
-            tanh_output=action_head_cfg.get("tanh_output", False),  # 应该使用激活函数吗？教师模型tanh_encoder_output = False，会输出>1的action
-            action_scale=action_head_cfg.get("action_scale", 1.0),
-        )
-        self.yaw_head = nn.Sequential(
-            nn.Linear(token_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 2)
-        )
-
-    def forward(self, proprio_seq: Tensor, depth_seq: Tensor) -> Tensor:
-        """
-        Original simple forward (stateless).
-        Args:
-            proprio_seq: Tensor[B, S, prop_hist_len * proprio_dim]
-            depth_seq: Tensor[B, S, depth_hist_len, H, W]
-        """
-        actions, _ = self.forward_with_mems(proprio_seq, depth_seq, mems=None)
-        return actions
-
-    def forward_with_mems(
-        self,
-        proprio_seq: Tensor,
-        depth_seq: Tensor,
-        mems: Optional[List[Tensor]] = None,
-    ) -> Tuple[Tensor, List[Tensor]]:
-        """
-        Forward pass with segment recurrence memory support (TBPTT).
-
-        Args:
-            proprio_seq: Tensor[B, S, prop_hist_len * proprio_dim]
-            depth_seq: Tensor[B, S, depth_hist_len, H, W]
-            mems: Optional list of memory tensors from previous segment (should be detached)
-
-        Returns:
-            actions: Predicted action means of shape [B, S, action_dim]
-            new_mems: List of new memory tensors for next segment
-        """
-
-        batch_size, seq_len, feat_dim = proprio_seq.shape
-        prop_encoded = self.proprio_encoder(
-            proprio_seq.reshape(batch_size * seq_len, feat_dim)
-        )  # [B*S, prop_hist_len*proprio_dim]
-        depth_encoded = self.depth_encoder(
-            depth_seq.reshape(batch_size * seq_len, depth_seq.size(2), depth_seq.size(3), depth_seq.size(4))
-        )  # [B*S, depth_hist_len, H, W]
-        fused = self.fusion_transformer(prop_encoded, depth_encoded)
-        fused_seq = fused["all_pooled"].reshape(batch_size, seq_len, -1)
-
-        # Temporal modeling with memory
-        temporal_out, new_mems = self.temporal_model(
-            fused_seq,
-            mems=mems,           # Pass previous segment's mems
-            causal_mask=True,
-            return_mems=True,    # Return new mems for next segment
-        )
-        actions = self.action_head.forward_sequence(temporal_out)["mean"]
-        raw_yaws = self.yaw_head(temporal_out)
-        predicted_yaws = 1.5 * torch.tanh(raw_yaws)
-        return actions, predicted_yaws, new_mems
 
 
 def parse_args() -> argparse.Namespace:
@@ -446,6 +195,7 @@ def build_student_from_dataset(
     streamer: TeacherDatasetStreamer,
     prop_hist_len: int,
     depth_hist_len: int,
+    mem_len: int,
 ) -> Tuple[MultiModalStudentPolicy, int]:
     meta = streamer.meta
     proprio_dim = int(meta.get("num_prop", 0))
@@ -457,37 +207,14 @@ def build_student_from_dataset(
         meta.setdefault("num_prop", proprio_dim)
         meta.setdefault("action_dim", action_dim)
     camera_resolution = tuple(meta.get("camera_resolution", [64, 64]))
-    fusion_cfg = {
-        "num_layers": 2,
-        "num_heads": 4,
-        "mlp_ratio": 2.0,
-        "dropout": 0.1,
-        "attn_dropout": 0.1,
-        "grid_size": 4,
-    }
-    temporal_cfg = {
-        "num_layers": 3,
-        "num_heads": 4,
-        "d_inner": 256,
-        "mem_len": 64,
-        "dropout": 0.1,
-        "attn_dropout": 0.1,
-    }
-    action_head_cfg = {
-        "hidden_dims": (256, 256),
-        "tanh_output": False,   # 教师模型tanh_encoder_output = False，会输出>1的action
-        "action_scale": 1,  # 教师模型没有使用action_sacle
-    }
-    model = MultiModalStudentPolicy(
+    model = build_student_model(
         proprio_dim=proprio_dim,
         action_dim=action_dim,
         camera_resolution=camera_resolution,
         prop_hist_len=prop_hist_len,
         depth_hist_len=depth_hist_len,
-        fusion_cfg=fusion_cfg,
-        temporal_cfg=temporal_cfg,
-        action_head_cfg=action_head_cfg,
-        token_dim=128,
+        mem_len=mem_len,
+        token_dim=128
     )
     return model, action_dim
 
@@ -537,15 +264,16 @@ def run_training() -> None:
     args = parse_args()
     dataset_dir = Path(args.dataset).expanduser().resolve()
     save_dir = Path(args.save_dir).expanduser().resolve() if args.save_dir else dataset_dir / "student_policy"
+    device = torch.device(args.device)
     streamer = TeacherDatasetStreamer(
         dataset_dir=dataset_dir,
         sequence_len=args.sequence_length,
         prop_hist_len=args.prop_hist_len,
         depth_hist_len=args.depth_hist_len,
+        device=device,
         use_dropout=args.use_dropout
     )
-    model, _ = build_student_from_dataset(streamer, args.prop_hist_len, args.depth_hist_len)
-    device = torch.device(args.device)
+    model, _ = build_student_from_dataset(streamer, args.prop_hist_len, args.depth_hist_len, args.sequence_length)
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     start_epoch = 0
