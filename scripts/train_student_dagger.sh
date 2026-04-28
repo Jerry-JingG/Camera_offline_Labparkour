@@ -18,7 +18,7 @@ SEQUENCE_LENGTH=128                                          # --sequence_length
 PROP_HIST_LEN=1                                             # --prop_hist_len：ProprioEncoder 的历史步数
 DEPTH_HIST_LEN=1                                            # --depth_hist_len：DepthEncoder 的帧堆叠数
 
-TEACHER_CHECKPOINT="logs/rsl_rl/unitree_go2_parkour/2026-01-28_22-35-55_try2/model_74000.pt"    # 教师 PPO 权重路径
+TEACHER_CHECKPOINT="logs/rsl_rl/unitree_go2_parkour/260128_ckpt/model_74000.pt"    # 教师 PPO 权重路径
 STUDENT_CHECKPOINT=""                                           # 可选：已有学生模型 checkpoint
 SAVE_DIR="outputs/students/train_from_dagger/xl0416"          # 输出目录
 

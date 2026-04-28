@@ -18,29 +18,27 @@ PROP_HIST_LEN=1                                             # --prop_hist_len：
 DEPTH_HIST_LEN=1                                            # --depth_hist_len：DepthEncoder 的帧堆叠数
 
 # ------------------------------- 权重与路径配置 -----------------------------------
-TEACHER_CHECKPOINT="logs/rsl_rl/unitree_go2_parkour/2026-01-28_22-35-55_try2/model_74000.pt"
+TEACHER_CHECKPOINT="logs/rsl_rl/unitree_go2_parkour/260128_ckpt/model_74000.pt"
 STUDENT_CHECKPOINT="outputs/students/train_from_dagger/xl0413/student_dagger_49999.pt"
 STUDENT_IS_DAGGER=true                                      # --student_is_dagger：指明只加载 Actor，不加载 DAgger 的优化器
 LOAD_TEACHER_CRITIC=true                                    # --load_teacher_critic：复用老师的 Critic 权重加速收敛
 
-SAVE_DIR="outputs/students/rl_finetune/txl0420"                      # 输出目录
+SAVE_DIR="outputs/students/rl_finetune/txl0426"                      # 输出目录
 SAVE_INTERVAL=1000                                          # --save_interval
 
-# ------------------------------- PPO 算法超参数 -----------------------------------
-PPO_EPOCHS=4                                                # --ppo_epochs
-ACTOR_LR=2e-5                                               # --actor_lr
-CRITIC_LR=3e-4                                              # --critic_lr
+# ------------------------------- RL超参数 ---------------------------------------
+ACTOR_LR=5e-6                                               # --actor_lr
+CRITIC_LR=3e-5                                              # --critic_lr
 WEIGHT_DECAY=1e-4                                           # --weight_decay
 GRAD_CLIP=1.0                                               # --grad_clip
 
-CLIP_PARAM=0.2                                              # --clip_param：PPO 截断范围
 ENTROPY_COEF=0.01                                           # --entropy_coef：初期可稍微调大(如 0.01)鼓励探索
 VALUE_LOSS_COEF=0.5                                         # --value_loss_coef
-YAW_LOSS_COEF=1.0                                           # --yaw_loss_coef
+YAW_LOSS_COEF=0.2                                           # --yaw_loss_coef
 GAMMA=0.99                                                  # --gamma
 LAM=0.95                                                    # --lam
 
-FREEZE_CRITIC_ITERS=1000                                     # --freeze_critic_iters：冻结 Critic 前 N 轮
+FREEZE_CRITIC_ITERS=0                                     # --freeze_critic_iters：冻结 Critic 前 N 轮
 
 # -------------------------- 数据增强 (Dropout) -------------------------------
 # 模拟摄像头/传感器掉线，强制学生学习鲁棒性
@@ -49,7 +47,7 @@ USE_DROPOUT=true
 # ------------------------------- 日志 / W&B 参数 -------------------------------
 USE_WANDB=true                                              # --wandb：是否开启 W&B
 WANDB_PROJECT="camera-offline-parkour"                      # --wandb_project
-WANDB_RUN_NAME="rl-txl-0420"                                # --wandb_run_name
+WANDB_RUN_NAME="rl-txl-0426"                                # --wandb_run_name
 LOG_INTERVAL=10                                             # --log_interval
 
 # --------------------------- AppLauncher / Isaac 参数 -------------------------
@@ -74,13 +72,11 @@ RL_CMD=("${PYTHON_BIN}" "scripts/txl_student/train_student_rl.py"
     "--prop_hist_len" "${PROP_HIST_LEN}"
     "--depth_hist_len" "${DEPTH_HIST_LEN}"
     
-    "--ppo_epochs" "${PPO_EPOCHS}"
     "--actor_lr" "${ACTOR_LR}"
     "--critic_lr" "${CRITIC_LR}"
     "--weight_decay" "${WEIGHT_DECAY}"
     "--grad_clip" "${GRAD_CLIP}"
     
-    "--clip_param" "${CLIP_PARAM}"
     "--entropy_coef" "${ENTROPY_COEF}"
     "--value_loss_coef" "${VALUE_LOSS_COEF}"
     "--yaw_loss_coef" "${YAW_LOSS_COEF}"
