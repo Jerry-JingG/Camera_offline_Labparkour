@@ -9,8 +9,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ------------------------------- 核心环境与网络参数 ---------------------------------
 TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Collect-v0"  # --task
-NUM_ENVS=64                                                 # --num_envs：并行环境数量
-NUM_ITERS=10000                                             # --num_iters：RL 总迭代次数
+NUM_ENVS=56                                                 # --num_envs：并行环境数量
+NUM_ITERS=20000                                             # --num_iters：RL 总迭代次数
 
 # HIST_LEN 必须 DAgger 预训练时完全一致
 SEQUENCE_LENGTH=128                                         # --sequence_length：PPO Rollout 长度 & TXL mem_len
@@ -19,26 +19,31 @@ DEPTH_HIST_LEN=1                                            # --depth_hist_len�
 
 # ------------------------------- 权重与路径配置 -----------------------------------
 TEACHER_CHECKPOINT="logs/rsl_rl/unitree_go2_parkour/260128_ckpt/model_74000.pt"
-STUDENT_CHECKPOINT="outputs/students/train_from_dagger/xl0413/student_dagger_49999.pt"
+STUDENT_CHECKPOINT="outputs/students/train_from_dagger/xl0416/student_dagger_49999.pt"
 STUDENT_IS_DAGGER=true                                      # --student_is_dagger：指明只加载 Actor，不加载 DAgger 的优化器
 LOAD_TEACHER_CRITIC=true                                    # --load_teacher_critic：复用老师的 Critic 权重加速收敛
 
-SAVE_DIR="outputs/students/rl_finetune/txl0426"                      # 输出目录
+SAVE_DIR="outputs/students/rl_finetune/txl0429"                      # 输出目录
 SAVE_INTERVAL=1000                                          # --save_interval
 
 # ------------------------------- RL超参数 ---------------------------------------
-ACTOR_LR=5e-6                                               # --actor_lr
+ACTOR_LR=3e-6                                               # --actor_lr
 CRITIC_LR=3e-5                                              # --critic_lr
 WEIGHT_DECAY=1e-4                                           # --weight_decay
 GRAD_CLIP=1.0                                               # --grad_clip
 
-ENTROPY_COEF=0.01                                           # --entropy_coef：初期可稍微调大(如 0.01)鼓励探索
+ENTROPY_COEF=0.005                                           # --entropy_coef：初期可稍微调大(如 0.01)鼓励探索
 VALUE_LOSS_COEF=0.5                                         # --value_loss_coef
-YAW_LOSS_COEF=0.2                                           # --yaw_loss_coef
+YAW_LOSS_COEF=0.05                                           # --yaw_loss_coef
 GAMMA=0.99                                                  # --gamma
 LAM=0.95                                                    # --lam
 
 FREEZE_CRITIC_ITERS=0                                     # --freeze_critic_iters：冻结 Critic 前 N 轮
+
+CLIP_PARAM=0.2
+PPO_EPOCHS=4
+FREEZE_ENCODER_ITERS=10000
+INIT_LOG_STD=-1.6
 
 # -------------------------- 数据增强 (Dropout) -------------------------------
 # 模拟摄像头/传感器掉线，强制学生学习鲁棒性
@@ -47,7 +52,7 @@ USE_DROPOUT=true
 # ------------------------------- 日志 / W&B 参数 -------------------------------
 USE_WANDB=true                                              # --wandb：是否开启 W&B
 WANDB_PROJECT="camera-offline-parkour"                      # --wandb_project
-WANDB_RUN_NAME="rl-txl-0426"                                # --wandb_run_name
+WANDB_RUN_NAME="rl-txl-0429"                                # --wandb_run_name
 LOG_INTERVAL=10                                             # --log_interval
 
 # --------------------------- AppLauncher / Isaac 参数 -------------------------
@@ -84,6 +89,11 @@ RL_CMD=("${PYTHON_BIN}" "scripts/txl_student/train_student_rl.py"
     "--lam" "${LAM}"
     
     "--freeze_critic_iters" "${FREEZE_CRITIC_ITERS}"
+
+    "--clip_param" "${CLIP_PARAM}"
+    "--ppo_epochs" "${PPO_EPOCHS}"
+    "--freeze_encoder_iters" "${FREEZE_ENCODER_ITERS}"
+    "--init_log_std" "${INIT_LOG_STD}"
     
     "--save_dir" "${SAVE_DIR}"
     "--save_interval" "${SAVE_INTERVAL}"

@@ -278,6 +278,11 @@ def parse_args():
     p.add_argument("--lam",               type=float, default=0.95)
     p.add_argument("--normalize_adv",     action="store_true", default=True)
 
+    p.add_argument("--clip_param",        type=float, default=0.2,  help="PPO clip epsilon")
+    p.add_argument("--ppo_epochs",    type=int,   default=4,    help="PPO update epochs per rollout")
+    p.add_argument("--freeze_encoder_iters", type=int, default=500, help="Iters to freeze encoders (proprio/depth/fusion)")
+    p.add_argument("--init_log_std",      type=float, default=-1.6, help="Initial log_std when loading DAgger ckpt (~0.2 std)")
+
     # ── optimiser ──────────────────────────────────────────────────────────────
     p.add_argument("--actor_lr",    type=float, default=1e-4)
     p.add_argument("--critic_lr",   type=float, default=3e-4)
@@ -362,7 +367,16 @@ def main():  # noqa: C901
     if args.load_teacher_critic:
         try_load_teacher_critic(critic, args.teacher_checkpoint)
 
-    actor_opt = torch.optim.AdamW(actor.parameters(), lr=args.actor_lr, weight_decay=args.weight_decay)
+    _encoder_params, _policy_params = [], []
+    _encoder_modules = (actor.proprio_encoder, actor.depth_encoder, actor.fusion_transformer)
+    _encoder_ids = {id(p) for m in _encoder_modules for p in m.parameters()}
+    for p in actor.parameters():
+        (_encoder_params if id(p) in _encoder_ids else _policy_params).append(p)
+
+    actor_opt = torch.optim.AdamW([
+        {"params": _encoder_params, "lr": args.actor_lr * 0.1},   # encoder 用更小 lr
+        {"params": _policy_params,  "lr": args.actor_lr},
+    ], weight_decay=args.weight_decay)
     critic_opt = torch.optim.AdamW(critic.parameters(), lr=args.critic_lr, weight_decay=args.weight_decay)
 
     actor_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -375,13 +389,8 @@ def main():  # noqa: C901
         ckpt_path = Path(args.student_checkpoint)
         if args.student_is_dagger:
             load_actor_only(ckpt_path, actor, device)
-            import math
             with torch.no_grad():
-                target_std = 0.1
-                target_log_std = math.log(target_std)
-
-                # 强行覆盖模型中的 log_std 参数
-                actor.action_head.log_std.fill_(target_log_std)
+                actor.action_head.log_std.fill_(args.init_log_std)
         else:
             start_iter = load_checkpoint(ckpt_path, actor, critic, actor_opt, critic_opt, device)
 
@@ -435,13 +444,18 @@ def main():  # noqa: C901
 
     from isaaclab.utils.math import euler_xyz_from_quat, wrap_to_pi
 
-    print(f"[A2C] Starting Vanilla A2C training  iters={args.num_iters}  "
+    print(f"[RL] Starting PPO training  iters={args.num_iters}  "
           f"seq_len={args.sequence_length}  num_envs={args.num_envs}")
 
     # ══════════════════════════════════════════════════════════════════════════
     train_mems: Optional[List[Tensor]] = None
     for it in range(start_iter, args.num_iters):
         iter_start = time.time()
+
+        encoder_frozen = it < args.freeze_encoder_iters
+        for m in (actor.proprio_encoder, actor.depth_encoder, actor.fusion_transformer):
+            for p in m.parameters():
+                p.requires_grad_(not encoder_frozen)
 
         actor.eval()
         critic.eval()
@@ -532,63 +546,92 @@ def main():  # noqa: C901
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # ────────────────────────────────────────────────────────────────────
-        #  (C)  Vanilla A2C Update (No Importance Sampling, No Clipping)
+        #  (C)  PPO Update
         # ────────────────────────────────────────────────────────────────────
-        actor.train()
+        actor.eval()
         critic.train()
 
         critic_frozen = (it < args.freeze_critic_iters)
         for p in critic.parameters():
             p.requires_grad_(not critic_frozen)
 
+        with torch.no_grad():
+            _, anchor_log_probs, _, _, _ = actor.forward_with_mems_rl(
+                rl_buffer.proprio, rl_buffer.depth,
+                old_actions=rl_buffer.actions, mems=train_mems
+            )
+
         N, S = advantages.shape
+        final_epoch_mems = None
+        target_kl = 0.1
+        early_stop = False
+        for epoch in range(args.ppo_epochs):
+            # Re-evaluate log-probs under current policy
+            current_mems = [m.clone() for m in train_mems] if train_mems else None
+            _, new_log_probs, new_entropy, pred_yaws, epoch_out_mems = actor.forward_with_mems_rl(
+                rl_buffer.proprio,
+                rl_buffer.depth,
+                old_actions=rl_buffer.actions,
+                mems=current_mems
+            )
 
-        # Forward pass
-        _, new_log_probs, new_entropy, pred_yaws, new_train_mems = actor.forward_with_mems_rl(
-            rl_buffer.proprio,
-            rl_buffer.depth,
-            old_actions=rl_buffer.actions,
-            mems=train_mems
-        )
+            new_values = critic(rl_buffer.priv_obs.reshape(N * S, -1)).reshape(N, S)
 
-        new_values = critic(rl_buffer.priv_obs.reshape(N * S, -1)).reshape(N, S)
+            # PPO surrogate
+            log_ratio = new_log_probs - anchor_log_probs
+            with torch.no_grad():
+                approx_kl = (0.5 * log_ratio ** 2).mean().item()
 
-        # ==========================================================
-        # 🌟 Pure Policy Gradient Loss (A2C) 🌟
-        # No ratio, no clamping. Just: - E[ log_prob * Advantage ]
-        # ==========================================================
-        policy_loss = -(new_log_probs * advantages).mean()
+            if approx_kl > target_kl * 1.5:
+                print(f"      [Early Stop] Epoch {epoch} KL {approx_kl:.4f} > Threshold. Stopping update.")
+                early_stop = True
+                break  # 直接跳出 Epoch 循环！保护策略不被过度更新！
 
-        # Pure MSE for Value Loss (No clipping)
-        value_loss = F.mse_loss(new_values, returns)
+            ratio = torch.exp(log_ratio)
+            surr1 = ratio * advantages
+            surr2 = ratio.clamp(1.0 - args.clip_param, 1.0 + args.clip_param) * advantages
+            policy_loss = -torch.min(surr1, surr2).mean()
 
-        # Auxiliary yaw loss
-        yaw_loss = F.mse_loss(pred_yaws, rl_buffer.extra_info)
+            # Value loss (clipped)
+            val_clipped = rl_buffer.values + (new_values - rl_buffer.values).clamp(
+                -args.clip_param, args.clip_param
+            )
+            _value_loss = (new_values - returns).pow(2)
+            _value_loss_clipped = (val_clipped - returns).pow(2)
+            value_loss = torch.max(_value_loss, _value_loss_clipped).mean()
 
-        # Total loss
-        total_loss = (policy_loss
-                      + args.value_loss_coef * value_loss
-                      - args.entropy_coef * new_entropy.mean()
-                      + args.yaw_loss_coef * yaw_loss)
+            # Auxiliary yaw loss
+            yaw_loss = F.mse_loss(pred_yaws, rl_buffer.extra_info)
 
-        actor_opt.zero_grad()
-        critic_opt.zero_grad()
-        total_loss.backward()
+            # Total loss
+            total_loss = (policy_loss
+                        + args.value_loss_coef * value_loss
+                        - args.entropy_coef * new_entropy.mean()
+                        + args.yaw_loss_coef * yaw_loss)
 
-        nn.utils.clip_grad_norm_(actor.parameters(), args.grad_clip)
-        actor_opt.step()
+            actor_opt.zero_grad()
+            critic_opt.zero_grad()
+            total_loss.backward()
 
-        if not critic_frozen:
-            nn.utils.clip_grad_norm_(critic.parameters(), args.grad_clip)
-            critic_opt.step()
+            nn.utils.clip_grad_norm_(actor.parameters(), args.grad_clip)
+            actor_opt.step()
 
+            if not critic_frozen:
+                nn.utils.clip_grad_norm_(critic.parameters(), args.grad_clip)
+                critic_opt.step()
+
+            # Store the resulting mems from the very last epoch to pass back to the runner
+            final_epoch_mems = epoch_out_mems
+
+        if early_stop:
+            torch.cuda.empty_cache()
         # actor_scheduler.step()
 
         # ────────────────────────────────────────────────────────────────────
         #  (D)  Sync clean mems back to the Runner
         # ────────────────────────────────────────────────────────────────────
-        if new_train_mems is not None:
-            train_mems = TransformerXLTemporal.detach_mems(new_train_mems)
+        if final_epoch_mems is not None:
+            train_mems = TransformerXLTemporal.detach_mems(final_epoch_mems)
             for b in range(N):
                 done_indices = torch.nonzero(rl_buffer.dones[b])
                 if done_indices.numel() > 0:
@@ -607,11 +650,17 @@ def main():  # noqa: C901
         iter_time = time.time() - iter_start
 
         if (it + 1) % args.log_interval == 0:
+            with torch.no_grad():
+                approx_kl = ((ratio - 1) - log_ratio).mean().item()
+                clip_frac = ((ratio - 1.0).abs() > args.clip_param).float().mean().item()
+
             print(
                 f"[Iter {it+1:5d}]  "
                 f"policy={policy_loss.item():.4f}  "
                 f"value={value_loss.item():.4f}  "
                 f"entropy={new_entropy.mean().item():.4f}  "
+                f"kl={approx_kl:.4f}  "
+                f"clip={clip_frac:.3f}  "
                 f"lr={actor_scheduler.get_last_lr()[0]:.2e}  "
                 f"time={iter_time:.2f}s"
             )
@@ -623,6 +672,8 @@ def main():  # noqa: C901
                     "rl/entropy": new_entropy.mean().item(),
                     "rl/yaw_loss": yaw_loss.item(),
                     "rl/total_loss": total_loss.item(),
+                    "ppo/approx_kl": approx_kl,
+                    "ppo/clip_frac": clip_frac,
                     "params/actor_lr": actor_scheduler.get_last_lr()[0],
                     "params/critic_frozen": int(critic_frozen),
                     "rollout/ep_return_mean": np.mean(ep_returns) if ep_returns else 0.0,
