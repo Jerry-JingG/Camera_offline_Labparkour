@@ -181,22 +181,26 @@ class StudentOnlineRunner:
         self.device = device
 
         # History Buffer: 行为类似deque, 不过现在使用np.roll实现
-        self.prop_histories = torch.zeros(
+        self.prop_hist = torch.zeros(
             num_envs, prop_hist_len, proprio_dim,
             dtype=torch.float32, device=device
         )
-        self.depth_histories = torch.zeros(
+        self.depth_hist = torch.zeros(
             num_envs, depth_hist_len, *camera_resolution,
             dtype=torch.float32, device=device
         )
+        self.dones_hist = torch.zeros(num_envs, self.model.temporal_model.mem_len, dtype=torch.bool, device=device)
+        self.current_mem_len=0
 
         # TransformerXL Memory, Shape: List[Tensor], where each Tensor is [Num_Envs, Mem_Len, D_Model]
         self.mems: Optional[List[torch.Tensor]] = None
 
     def reset(self) -> None:
         """Reset all environments."""
-        self.prop_histories.zero_()
-        self.depth_histories.zero_()
+        self.prop_hist.zero_()
+        self.depth_hist.zero_()
+        self.dones_hist.zero_()
+        self.current_mem_len=0
         # Directly set to None. TransformerXLTemporal handles it automatically.
         self.mems = None
 
@@ -209,17 +213,18 @@ class StudentOnlineRunner:
         if not done_mask.any():
             return
 
-        self.prop_histories[done_mask] = 0
-        self.depth_histories[done_mask] = 0
+        self.prop_hist[done_mask] = 0
+        self.depth_hist[done_mask] = 0
 
-        if self.mems is not None:
-            for i in range(len(self.mems)):
-                self.mems[i][done_mask] = 0
+        # if self.mems is not None:
+        #     for i in range(len(self.mems)):
+        #         self.mems[i][done_mask] = 0
 
     def act(
         self,
         obs_prop: torch.Tensor,     # [num_envs, proprio_dim]
         depth_image: torch.Tensor,  # [num_envs, H, W] or [num_envs, 1, H, W]
+        prev_done
     ) -> torch.Tensor:
         """
         Perform one inference step using cached memory.
@@ -230,34 +235,45 @@ class StudentOnlineRunner:
         if depth_image.dim() == 4 and depth_image.shape[1] == 1:
             depth_image = depth_image.squeeze(1)
 
-        self.prop_histories = torch.roll(self.prop_histories, -1, dims=1)
-        self.depth_histories = torch.roll(self.depth_histories, -1, dims=1)
+        self.prop_hist = torch.roll(self.prop_hist, -1, dims=1)
+        self.depth_hist = torch.roll(self.depth_hist, -1, dims=1)
+        self.dones_hist = torch.roll(self.dones_hist, -1, dims=1)
 
-        self.prop_histories[:, -1, :] = obs_prop
-        self.depth_histories[:, -1, :, :] = depth_image
+        self.prop_hist[:, -1, :] = obs_prop
+        self.depth_hist[:, -1, :, :] = depth_image
+        self.dones_hist[:, -1] = prev_done
 
         # Prepare inputs for the model
         # 1. Flatten proprio history: [B, Hist, Dim] -> [B, Hist*Dim]
         # 2. Add Sequence dimension S=1: [B, S=1, Features]
-        prop_input = self.prop_histories.view(self.num_envs, -1).unsqueeze(1)
+        prop_input = self.prop_hist.view(self.num_envs, -1).unsqueeze(1)
 
         # Depth Input: [B, S=1, Hist, H, W]
-        depth_input = self.depth_histories.unsqueeze(1)
+        depth_input = self.depth_hist.unsqueeze(1)
+
+        current_done = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
+        if self.current_mem_len > 0:
+            actual_dones_hist = self.dones_hist[:, -self.current_mem_len:] 
+        else:
+            actual_dones_hist = torch.empty(self.num_envs, 0, dtype=torch.bool, device=self.device)
+        full_dones = torch.cat([actual_dones_hist, current_done], dim=1)
 
         # [Answer 4] Direct Model Call
         with torch.no_grad():
             actions, _, self.mems = self.model.forward_with_mems(
                 prop_input,
                 depth_input,
-                mems=self.mems
+                mems=self.mems,
+                full_dones=full_dones
             )
-
+        self.current_mem_len = min(self.current_mem_len + 1, self.model.temporal_model.mem_len)
         return actions.squeeze(1)  # Remove Sequence dim -> [B, Action_Dim]
 
     def act_rl(
         self,
         obs_prop: torch.Tensor,  # [N, proprio_dim]
         depth_image: torch.Tensor,  # [N, H, W]
+        prev_done
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns: action [N, A],  log_prob [N],  entropy [N]
@@ -269,20 +285,29 @@ class StudentOnlineRunner:
         if depth_image.dim() == 4 and depth_image.shape[1] == 1:
             depth_image = depth_image.squeeze(1)
 
-        self.prop_histories = torch.roll(self.prop_histories, -1, dims=1)
-        self.depth_histories = torch.roll(self.depth_histories, -1, dims=1)
+        self.prop_hist = torch.roll(self.prop_hist, -1, dims=1)
+        self.depth_hist = torch.roll(self.depth_hist, -1, dims=1)
+        self.dones_hist = torch.roll(self.dones_hist, -1, dims=1)
 
-        self.prop_histories[:, -1, :] = obs_prop
-        self.depth_histories[:, -1, :, :] = depth_image
+        self.prop_hist[:, -1, :] = obs_prop
+        self.depth_hist[:, -1, :, :] = depth_image
+        self.dones_hist[:, -1] = prev_done
 
-        prop_input = self.prop_histories.view(self.num_envs, -1).unsqueeze(1)
-        depth_input = self.depth_histories.unsqueeze(1)
+        prop_input = self.prop_hist.view(self.num_envs, -1).unsqueeze(1)
+        depth_input = self.depth_hist.unsqueeze(1)
+
+        current_done = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
+        if self.current_mem_len > 0:
+            actual_dones_hist = self.dones_hist[:, -self.current_mem_len:] 
+        else:
+            actual_dones_hist = torch.empty(self.num_envs, 0, dtype=torch.bool, device=self.device)
+        full_dones = torch.cat([actual_dones_hist, current_done], dim=1)
 
         with torch.no_grad():
             actions, log_probs, entropy, _, self.mems = self.model.forward_with_mems_rl(
-                prop_input, depth_input, old_actions=None, mems=self.mems
+                prop_input, depth_input, old_actions=None, mems=self.mems, full_dones=full_dones
             )
-
+        self.current_mem_len = min(self.current_mem_len + 1, self.model.temporal_model.mem_len)
         return actions.squeeze(1), log_probs.squeeze(1), entropy.squeeze(1)
 
 
@@ -292,8 +317,8 @@ class StudentOnlineRunner:
 
 class SequenceAggregator:
     """
-    prop_histories和depth_histories用于聚合fusion transformer需要的聚合历史输入
-    我对prop_histories和depth_histories初始化时进行了填零操作, 这样第一个环境步transformerxl就可以输出action
+    prop_hist和depth_hist用于聚合fusion transformer需要的聚合历史输入
+    我对prop_hist和depth_hist初始化时进行了填零操作, 这样第一个环境步transformerxl就可以输出action
     seq_prop[i]存储了第i个环境的感知观测序列
     """
     def __init__(
@@ -315,8 +340,8 @@ class SequenceAggregator:
         self.device = device
 
         # 1. History Buffer: 行为类似deque, 不过现在使用np.roll实现
-        self.prop_histories = torch.zeros((num_envs, prop_hist_len, num_prop), dtype=torch.float32, device=self.device)
-        self.depth_histories = torch.zeros((num_envs, depth_hist_len, *depth_shape), dtype=torch.float32, device=self.device)
+        self.prop_hist = torch.zeros((num_envs, prop_hist_len, num_prop), dtype=torch.float32, device=self.device)
+        self.depth_hist = torch.zeros((num_envs, depth_hist_len, *depth_shape), dtype=torch.float32, device=self.device)
 
         # 2. Sequence Buffer: 预分配内存，用于存储一个完整的 Sequence Batch
         self.seq_prop = torch.zeros((num_envs, sequence_len, prop_hist_len * num_prop), dtype=torch.float32, device=self.device)
@@ -329,8 +354,8 @@ class SequenceAggregator:
         self.current_seq_step = 0
 
     def reset(self) -> None:
-        self.prop_histories.zero_()
-        self.depth_histories.zero_()
+        self.prop_hist.zero_()
+        self.depth_hist.zero_()
 
         self.seq_prop.zero_()
         self.seq_depth.zero_()
@@ -345,12 +370,12 @@ class SequenceAggregator:
         接收 Tensor 数据（需保证已在正确的 device 上），更新历史 buffer 和 sequence buffer。
         """
         # --- 1. 更新历史 (整体左移) ---
-        self.prop_histories = torch.roll(self.prop_histories, -1, dims=1)
-        self.depth_histories = torch.roll(self.depth_histories, -1, dims=1)
+        self.prop_hist = torch.roll(self.prop_hist, -1, dims=1)
+        self.depth_hist = torch.roll(self.depth_hist, -1, dims=1)
 
         # 填入最新数据
-        self.prop_histories[:, -1, :] = obs_prop
-        self.depth_histories[:, -1, :, :] = depth_frame
+        self.prop_hist[:, -1, :] = obs_prop
+        self.depth_hist[:, -1, :, :] = depth_frame
 
         # --- 2. 填入 Sequence Buffer ---
         idx = self.current_seq_step
@@ -361,10 +386,10 @@ class SequenceAggregator:
             self.seq_action = torch.zeros((self.num_envs, self.sequence_len, action_dim), dtype=torch.float32, device=self.device)
 
         # Flatten Proprio: [Num_Envs, Hist_Len, num_prop] -> [Num_Envs, Hist_Len * num_prop]
-        current_prop_flat = self.prop_histories.reshape(self.num_envs, -1)
+        current_prop_flat = self.prop_hist.reshape(self.num_envs, -1)
 
         self.seq_prop[:, idx] = current_prop_flat
-        self.seq_depth[:, idx] = self.depth_histories
+        self.seq_depth[:, idx] = self.depth_hist
         self.seq_action[:, idx] = teacher_actions
         self.seq_done[:, idx] = done
         self.seq_info[:, idx] = extra_info
@@ -372,8 +397,8 @@ class SequenceAggregator:
         # --- 3. 处理 Done (批量清零) ---
         if done.any():
             """ 对于done掉的环境, 不能将它们的seq_buffer置0,因为transformer网络在训练时是sequencely output的!!! """
-            self.prop_histories[done] = 0.0
-            self.depth_histories[done] = 0.0
+            self.prop_hist[done] = 0.0
+            self.depth_hist[done] = 0.0
 
         # --- 4. 检查 Batch 是否完成 ---
         self.current_seq_step += 1

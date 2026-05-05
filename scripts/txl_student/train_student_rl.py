@@ -280,7 +280,6 @@ def parse_args():
 
     p.add_argument("--clip_param",        type=float, default=0.2,  help="PPO clip epsilon")
     p.add_argument("--ppo_epochs",    type=int,   default=4,    help="PPO update epochs per rollout")
-    p.add_argument("--freeze_encoder_iters", type=int, default=500, help="Iters to freeze encoders (proprio/depth/fusion)")
     p.add_argument("--init_log_std",      type=float, default=-1.6, help="Initial log_std when loading DAgger ckpt (~0.2 std)")
 
     # ── optimiser ──────────────────────────────────────────────────────────────
@@ -367,22 +366,45 @@ def main():  # noqa: C901
     if args.load_teacher_critic:
         try_load_teacher_critic(critic, args.teacher_checkpoint)
 
-    _encoder_params, _policy_params = [], []
-    _encoder_modules = (actor.proprio_encoder, actor.depth_encoder, actor.fusion_transformer)
-    _encoder_ids = {id(p) for m in _encoder_modules for p in m.parameters()}
-    for p in actor.parameters():
-        (_encoder_params if id(p) in _encoder_ids else _policy_params).append(p)
+    # 1. 永久冻结所有的 Encoder (Proprio, Depth, Fusion)
+    for m in (actor.proprio_encoder, actor.depth_encoder, actor.fusion_transformer):
+        for p in m.parameters():
+            p.requires_grad_(False)
 
-    actor_opt = torch.optim.AdamW([
-        {"params": _encoder_params, "lr": args.actor_lr * 0.1},   # encoder 用更小 lr
-        {"params": _policy_params,  "lr": args.actor_lr},
-    ], weight_decay=args.weight_decay)
-    critic_opt = torch.optim.AdamW(critic.parameters(), lr=args.critic_lr, weight_decay=args.weight_decay)
+    # 2. 仅冻结 TransformerXL 前几层 (保留最后一层) 的 Attention 投影矩阵
+    # 这样 Attention Routing 逻辑被稳固地保留下来，但允许 LayerNorm 和 FFN 微调适应 RL domain
+    num_layers = len(actor.temporal_model.layers)
+    freeze_layers = max(1, num_layers - 1)  # 冻结除最后一层外的所有层
+    for layer in actor.temporal_model.layers[:freeze_layers]:
+        for p in layer.attn.q_proj.parameters():
+            p.requires_grad_(False)
+        for p in layer.attn.k_proj.parameters():
+            p.requires_grad_(False)
+        for p in layer.attn.v_proj.parameters():
+            p.requires_grad_(False)
+        layer.attn.u_bias.requires_grad = False
+
+    # 打印参数统计
+    trainable = sum(p.numel() for p in actor.parameters() if p.requires_grad)
+    frozen = sum(p.numel() for p in actor.parameters() if not p.requires_grad)
+    print(f"[Info] Actor parameters -> trainable: {trainable:,}, frozen: {frozen:,}")
+    # =================================================================================
+
+    # ── build optimizers (使用 filter 防止分配无用内存) ────────────────────────
+    actor_opt = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, actor.parameters()),
+        lr=args.actor_lr, 
+        weight_decay=args.weight_decay
+    )
+    critic_opt = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, critic.parameters()), 
+        lr=args.critic_lr, 
+        weight_decay=args.weight_decay
+    )
 
     actor_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         actor_opt, T_max=args.num_iters, eta_min=args.actor_lr * 0.1
     )
-
     # ── checkpoint loading ─────────────────────────────────────────────────────
     start_iter = 0
     if args.student_checkpoint:
@@ -438,6 +460,7 @@ def main():  # noqa: C901
     current_returns = torch.zeros(args.num_envs, device=device)
     current_lengths = torch.zeros(args.num_envs, device=device)
     dones_bool = torch.zeros(args.num_envs, dtype=torch.bool, device=device)
+    last_m_dones = None
 
     base_parkour = vec_env.unwrapped.parkour_manager.get_term("base_parkour")
     num_goals = int(getattr(base_parkour, "num_goals", 0))
@@ -451,11 +474,6 @@ def main():  # noqa: C901
     train_mems: Optional[List[Tensor]] = None
     for it in range(start_iter, args.num_iters):
         iter_start = time.time()
-
-        encoder_frozen = it < args.freeze_encoder_iters
-        for m in (actor.proprio_encoder, actor.depth_encoder, actor.fusion_transformer):
-            for p in m.parameters():
-                p.requires_grad_(not encoder_frozen)
 
         actor.eval()
         critic.eval()
@@ -477,7 +495,7 @@ def main():  # noqa: C901
                 base_parkour.target_yaw.clone().unsqueeze(-1),
                 base_parkour.next_target_yaw.clone().unsqueeze(-1),
             ], dim=-1)
-            student_prop[:, 12] = dones_bool.float()
+            # student_prop[:, 12] = dones_bool.float()
             student_depth = depth_image.clone()
 
             if dropout_manager is not None:
@@ -487,7 +505,7 @@ def main():  # noqa: C901
             priv_ob = obs.clone()
 
             # stochastic action from student policy
-            action, log_prob, _entropy = student_runner.act_rl(student_prop, student_depth)
+            action, log_prob, _entropy = student_runner.act_rl(student_prop, student_depth, prev_done=dones_bool)
 
             with torch.no_grad():
                 value = critic(priv_ob).squeeze(-1)
@@ -501,8 +519,8 @@ def main():  # noqa: C901
 
             # Direct history fetch from runner to unified buffer
             is_full = rl_buffer.push(
-                prop_hist=student_runner.prop_histories.view(args.num_envs, -1),
-                depth_hist=student_runner.depth_histories,
+                prop_hist=student_runner.prop_hist.view(args.num_envs, -1),
+                depth_hist=student_runner.depth_hist,
                 action=action,
                 reward=rewards_f,
                 done=dones_bool,
@@ -555,16 +573,12 @@ def main():  # noqa: C901
         for p in critic.parameters():
             p.requires_grad_(not critic_frozen)
 
-        with torch.no_grad():
-            _, anchor_log_probs, _, _, _ = actor.forward_with_mems_rl(
-                rl_buffer.proprio, rl_buffer.depth,
-                old_actions=rl_buffer.actions, mems=train_mems
-            )
-
         N, S = advantages.shape
+        full_dones = torch.cat([last_m_dones, rl_buffer.dones], dim=1) if last_m_dones is not None else rl_buffer.dones.clone()
         final_epoch_mems = None
         target_kl = 0.1
         early_stop = False
+
         for epoch in range(args.ppo_epochs):
             # Re-evaluate log-probs under current policy
             current_mems = [m.clone() for m in train_mems] if train_mems else None
@@ -572,22 +586,26 @@ def main():  # noqa: C901
                 rl_buffer.proprio,
                 rl_buffer.depth,
                 old_actions=rl_buffer.actions,
-                mems=current_mems
+                mems=current_mems,
+                full_dones=full_dones
             )
 
             new_values = critic(rl_buffer.priv_obs.reshape(N * S, -1)).reshape(N, S)
 
             # PPO surrogate
-            log_ratio = new_log_probs - anchor_log_probs
+            log_ratio = new_log_probs - rl_buffer.log_probs
+            ratio = torch.exp(log_ratio)
+
             with torch.no_grad():
-                approx_kl = (0.5 * log_ratio ** 2).mean().item()
+                approx_kl = ((ratio - 1) - log_ratio).mean().item()
+                # print(f"      Epoch{epoch}: KL{approx_kl:.4f} ")
 
             if approx_kl > target_kl * 1.5:
                 print(f"      [Early Stop] Epoch {epoch} KL {approx_kl:.4f} > Threshold. Stopping update.")
+                final_epoch_mems = epoch_out_mems
                 early_stop = True
                 break  # 直接跳出 Epoch 循环！保护策略不被过度更新！
 
-            ratio = torch.exp(log_ratio)
             surr1 = ratio * advantages
             surr2 = ratio.clamp(1.0 - args.clip_param, 1.0 + args.clip_param) * advantages
             policy_loss = -torch.min(surr1, surr2).mean()
@@ -628,21 +646,11 @@ def main():  # noqa: C901
         # actor_scheduler.step()
 
         # ────────────────────────────────────────────────────────────────────
-        #  (D)  Sync clean mems back to the Runner
+        #  (D)  Maintain memory consistency between training and inference.
         # ────────────────────────────────────────────────────────────────────
-        if final_epoch_mems is not None:
-            train_mems = TransformerXLTemporal.detach_mems(final_epoch_mems)
-            for b in range(N):
-                done_indices = torch.nonzero(rl_buffer.dones[b])
-                if done_indices.numel() > 0:
-                    last_done = done_indices.max().item()
-                    for layer_mem in train_mems:
-                        layer_mem[b, :last_done + 1, :] = 0.0
-
-            # Force sync Runner's mems
-            student_runner.mems = train_mems
-        else:
-            student_runner.mems = None
+        train_mems =[m.detach() for m in final_epoch_mems] if final_epoch_mems else None
+        last_m_dones = rl_buffer.dones.clone()
+        # student_runner.mems = [m.detach() for m in train_mems]
 
         # ────────────────────────────────────────────────────────────────────
         #  (E)  Logging

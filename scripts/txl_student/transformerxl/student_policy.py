@@ -81,14 +81,14 @@ class MultiModalStudentPolicy(nn.Module):
             nn.Linear(256, 2)
         )
 
-    def forward(self, proprio_seq: Tensor, depth_seq: Tensor) -> Tensor:
+    def forward(self, proprio_seq: Tensor, depth_seq: Tensor, dones: Optional[Tensor]) -> Tensor:
         """
         Original simple forward (stateless).
         Args:
             proprio_seq: Tensor[B, S, prop_hist_len * proprio_dim]
             depth_seq: Tensor[B, S, depth_hist_len, H, W]
         """
-        actions, _ = self.forward_with_mems(proprio_seq, depth_seq, mems=None)
+        actions, _ = self.forward_with_mems(proprio_seq, depth_seq, mems=None, dones=dones)
         return actions
 
     def forward_with_mems(
@@ -96,7 +96,8 @@ class MultiModalStudentPolicy(nn.Module):
         proprio_seq: Tensor,
         depth_seq: Tensor,
         mems: Optional[List[Tensor]] = None,
-    ) -> Tuple[Tensor, List[Tensor]]:
+        full_dones: Optional[Tensor] = None, # <--- 新增
+    ):
         """
         Forward pass with segment recurrence memory support (TBPTT).
 
@@ -123,9 +124,9 @@ class MultiModalStudentPolicy(nn.Module):
         # Temporal modeling with memory
         temporal_out, new_mems = self.temporal_model(
             fused_seq,
-            mems=mems,           # Pass previous segment's mems
-            causal_mask=True,
-            return_mems=True,    # Return new mems for next segment
+            mems=mems,
+            return_mems=True,
+            full_dones=full_dones
         )
         actions = self.action_head.forward_sequence(temporal_out)["mean"]
         raw_yaws = self.yaw_head(temporal_out)
@@ -134,11 +135,12 @@ class MultiModalStudentPolicy(nn.Module):
 
     def forward_with_mems_rl(
         self,
-        proprio_seq: Tensor,                   # [B, S, prop_hist_len * prop_dim]
-        depth_seq: Tensor,                   # [B, S, depth_hist_len, H, W]
-        old_actions: Optional[Tensor] = None,  # [B, S, A] – None → sample new actions
+        proprio_seq: Tensor,
+        depth_seq: Tensor,
+        old_actions: Optional[Tensor] = None,
         mems: Optional[List[Tensor]] = None,
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, List[Tensor]]:
+        full_dones: Optional[Tensor] = None, # <--- 新增
+    ):
         """
         Returns
         -------
@@ -161,7 +163,7 @@ class MultiModalStudentPolicy(nn.Module):
 
         # ── temporal model ───────────────────────────────────────────────────
         temporal_out, new_mems = self.temporal_model(
-            fused_seq, mems=mems, causal_mask=True, return_mems=True
+            fused_seq, mems=mems, return_mems=True, full_dones=full_dones
         )
 
         # ── action distribution ──────────────────────────────────────────────

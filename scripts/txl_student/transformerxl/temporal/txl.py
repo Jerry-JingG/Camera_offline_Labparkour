@@ -68,28 +68,66 @@ class TransformerXLTemporal(torch.nn.Module):
         self,
         x: torch.Tensor,
         mems: Optional[List[Optional[torch.Tensor]]] = None,
-        causal_mask: bool = True,
         return_mems: bool = True,
+        full_dones: Optional[torch.Tensor] = None,  # mem dones + sequence dones
+                                                    # sequence dones的dones[t]代表x[t]和x[t+1]属于不同的episode
     ) -> Tuple[torch.Tensor, Optional[List[torch.Tensor]]]:
-        """Run the temporal encoder with optional recurrent memory."""
-
-        if x.dim() != 3:
-            raise ValueError("Input x must have shape [B, S, C]")
+        
         batch, seq_len, channels = x.shape
-        if channels != self.d_model:
-            raise ValueError(f"Expected input embedding dim {self.d_model}, got {channels}")
-
         if mems is None:
             mems = [None] * self.n_layer
-        if len(mems) != self.n_layer:
-            raise ValueError("mems length must match number of layers")
+
+        mem_len = mems[0].size(1) if (mems[0] is not None) else 0
+        k_len = mem_len + seq_len
+
+        # ------------------ 动态 Mask 构建逻辑 ------------------
+        if full_dones is not None:
+            # 1. 严谨校验：传入的 dones 长度必须严格等于 Key 的总长度 (mem_len + seq_len)
+            assert full_dones.size(1) == k_len, \
+                f"Expected full_dones length {k_len} (mem_len {mem_len} + seq_len {seq_len}), but got {full_dones.size(1)}"
+
+            # 2. 计算回合起点：如果前一步是 Done (True)，那么当前步就是新回合的第一步
+            episode_starts = torch.zeros_like(full_dones, dtype=torch.bool)
+            if k_len > 1:
+                episode_starts[:, 1:] = full_dones[:, :-1].bool()
+            
+            # 3. 赋予每个 step 唯一的 Episode ID (通过累加)
+            episode_ids = torch.cumsum(episode_starts.long(), dim=1)
+            
+            # 4. 获取 Query 和 Key 的 Episode ID
+            # Query 仅对应当前的 x (长度为 seq_len)
+            q_ep = episode_ids[:, -seq_len:].unsqueeze(-1) #[B, S, 1]
+            # Key 对应整个序列缓存 (长度为 k_len)
+            k_ep = episode_ids.unsqueeze(1)                # [B, 1, K]
+            
+            # 5. 判断 Query 和 Key 是否在同一个回合。不相等说明跨回合了，产生 True 阻断。
+            diff_ep = q_ep != k_ep                         # [B, S, K]
+            
+            # 6. 生成因果掩码 (Causal Mask: 阻止看到未来)
+            q_pos = torch.arange(seq_len, device=x.device).unsqueeze(1) + mem_len
+            k_pos = torch.arange(k_len, device=x.device).unsqueeze(0)
+            base_mask = k_pos > q_pos                      # [S, K]
+
+            """rl训练时保留, dagger训练时注释掉"""
+            window_mask = (q_pos - k_pos) > self.mem_len
+            base_mask = base_mask | window_mask
+
+            # 7. 合并：因果掩码 | 回合阻断掩码 -> [Batch, 1, seq_len, k_len]
+            custom_mask = base_mask.unsqueeze(0).unsqueeze(0).expand(batch, 1, seq_len, k_len).clone()
+            custom_mask = custom_mask | diff_ep.unsqueeze(1)
+        else:
+            # 如果不传 full_dones，只使用普通的因果掩码 (FallBack)
+            q_pos = torch.arange(seq_len, device=x.device).unsqueeze(1) + mem_len
+            k_pos = torch.arange(k_len, device=x.device).unsqueeze(0)
+            base_mask = k_pos > q_pos
+            custom_mask = base_mask.unsqueeze(0).unsqueeze(0).expand(batch, 1, seq_len, k_len)
+        # -------------------------------------------------------------
 
         new_mems: List[torch.Tensor] = []
         h = x
         for layer, mem in zip(self.layers, mems):
-            if mem is not None and (mem.dim() != 3 or mem.size(0) != batch or mem.size(2) != self.d_model):
-                raise ValueError("Each memory must be [B, M, d_model]")
-            h, layer_mem = layer(h, mem, causal_mask)
+            # 将 custom_mask 传给 layer
+            h, layer_mem = layer(h, mem, custom_mask) 
             if return_mems:
                 new_mems.append(layer_mem)
 
@@ -152,7 +190,7 @@ class _TransformerXLLayer(torch.nn.Module):
         self,
         x: torch.Tensor,
         mem: Optional[torch.Tensor],
-        causal_mask: bool,
+        custom_mask: Optional[torch.Tensor] = None, # <--- 新增
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         batch, seq_len, _ = x.shape
         mem = self._ensure_mem(x, mem)
@@ -171,7 +209,7 @@ class _TransformerXLLayer(torch.nn.Module):
             q_input=q_input,
             kv_input=kv_input,
             mem_len=mem_len,
-            causal_mask=causal_mask,
+            custom_mask=custom_mask, # <--- 传下去
         )
 
         if self.norm_first:
@@ -246,7 +284,7 @@ class _TemporalMultiHeadAttention(torch.nn.Module):
         q_input: torch.Tensor,
         kv_input: torch.Tensor,
         mem_len: int,
-        causal_mask: bool,
+        custom_mask: Optional[torch.Tensor] = None, # <--- 新增
     ) -> torch.Tensor:
         batch, q_len, _ = q_input.shape
         k_len = kv_input.size(1)
@@ -263,9 +301,9 @@ class _TemporalMultiHeadAttention(torch.nn.Module):
             attn_scores = attn_scores + rel_term
 
         attn_scores = attn_scores * self.scale
-        mask = self._build_causal_mask(q_len, k_len, mem_len, q_input.device, causal_mask)
-        if mask is not None:
-            attn_scores = attn_scores.masked_fill(mask, torch.finfo(attn_scores.dtype).min)
+
+        if custom_mask is not None:
+            attn_scores = attn_scores.masked_fill(custom_mask, torch.finfo(attn_scores.dtype).min)
 
         attn_prob = torch.softmax(attn_scores, dim=-1)
         attn_prob = self.attn_dropout(attn_prob)

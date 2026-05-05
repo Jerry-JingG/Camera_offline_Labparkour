@@ -209,14 +209,14 @@ def main() -> None:
         current_yaw = wrap_to_pi(yaw)
         obs_prop[:, 6] = -current_yaw
         obs_prop[:, 7] = 0
-        obs_prop[:, 12] = dones_bool.float()
+        # obs_prop[:, 12] = dones_bool.float()
 
         if dropout_manager:
             dropout_manager.reset_env(dones_bool)
             dropout_manager.update(depth_image=depth_image, obs_prop=obs_prop)
 
         # 预测 Action
-        student_action = runner.act(obs_prop, depth_image)
+        student_action = runner.act(obs_prop, depth_image, prev_done=dones_bool)
 
         # Snapshot current goal index before step
         if base_parkour is not None:

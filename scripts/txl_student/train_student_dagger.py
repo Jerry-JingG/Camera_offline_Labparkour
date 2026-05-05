@@ -191,6 +191,7 @@ def main():
     # 6. DAgger Loop
     # Important: 'train_mems' are persistent across batches to allow TBPTT
     train_mems: Optional[List[Tensor]] = None
+    last_m_dones = None
 
     # Stats buffers
     ep_returns = deque(maxlen=100)
@@ -230,7 +231,7 @@ def main():
             student_prop[:, 7] = 0
             extra_info = torch.cat([base_parkour.target_yaw.clone().unsqueeze(-1), base_parkour.next_target_yaw.clone().unsqueeze(-1)], dim=-1)
 
-            student_prop[:, 12] = dones_bool.float()
+            # student_prop[:, 12] = dones_bool.float()
             student_depth = depth_image.clone()
 
             if dropout_manager:
@@ -238,7 +239,7 @@ def main():
                 dropout_manager.update(depth_image=student_depth, obs_prop=student_prop)
 
             # D. Student Action (Learner) - Uses AUGMENTED observations
-            student_actions = student_runner.act(student_prop, student_depth)
+            student_actions = student_runner.act(student_prop, student_depth, prev_done=dones_bool)
 
             goal_idx_before_step = None
             if base_parkour is not None and num_goals > 0:
@@ -268,7 +269,7 @@ def main():
                 obs_prop=student_prop,
                 depth_frame=student_depth,
                 teacher_actions=teacher_actions,
-                done=dones_bool,
+                done=dones_bool,  # {obs[t], act[t], dones[t]}
                 extra_info=extra_info
             )
 
@@ -308,9 +309,11 @@ def main():
         b_dones = batch_data["dones"].to(device)
         true_yaws = batch_data["extra_infos"].to(device)
 
+        full_dones = torch.cat([last_m_dones, b_dones], dim=1) if last_m_dones is not None else b_dones.clone()
+
         # Forward with segment recurrence
         pred_actions, pred_yaws, new_train_mems = student_model.forward_with_mems(
-            b_prop, b_depth, mems=train_mems
+            b_prop, b_depth, mems=train_mems, full_dones=full_dones
         )
         action_loss = nn.functional.mse_loss(pred_actions, b_actions)
         yaw_loss = nn.functional.mse_loss(pred_yaws, true_yaws)
@@ -327,27 +330,9 @@ def main():
         if new_train_mems is not None:
             # shape of mems is [num_layers, num_envs, Mem_Len, D_Model], do Truncated BPTT
             train_mems = TransformerXLTemporal.detach_mems(new_train_mems)
-            batch_size = b_dones.shape[0]
-
-            # 遍历每一个环境 (Batch Dimension)
-            for b in range(batch_size):
-                # 查找当前环境在该序列中所有 done 为 True 的位置
-                # torch.nonzero 返回 shape [N, 1]
-                done_indices = torch.nonzero(b_dones[b])
-
-                if done_indices.numel() > 0:
-                    # 找到该序列中 *最后一个* done 的位置
-                    last_done_idx = done_indices.max().item()
-                    # 核心修正逻辑:
-                    # 如果在第t步结束了Episode，那么t及t之前的所有Memory都属于旧Episode。
-                    # 下一个 Batch (从 t+1 或 S+1 开始) 不应该看到这些信息。
-                    # 因此将 [0, last_done_idx] 闭区间的mem清零。
-                    for layer_mem in train_mems:
-                        # layer_mem shape: [Batch, Mem_Len, D_Model]
-                        layer_mem[b, :last_done_idx + 1, :] = 0.0
-
         else:
             train_mems = None
+        last_m_dones = b_dones.clone()
 
         # --- Logging ---
         dt = time.time() - iter_start

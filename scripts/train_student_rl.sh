@@ -23,18 +23,18 @@ STUDENT_CHECKPOINT="outputs/students/train_from_dagger/xl0416/student_dagger_499
 STUDENT_IS_DAGGER=true                                      # --student_is_dagger：指明只加载 Actor，不加载 DAgger 的优化器
 LOAD_TEACHER_CRITIC=true                                    # --load_teacher_critic：复用老师的 Critic 权重加速收敛
 
-SAVE_DIR="outputs/students/rl_finetune/txl0429"                      # 输出目录
+SAVE_DIR="outputs/students/rl_finetune/txl0503"                      # 输出目录
 SAVE_INTERVAL=1000                                          # --save_interval
 
 # ------------------------------- RL超参数 ---------------------------------------
-ACTOR_LR=3e-6                                               # --actor_lr
-CRITIC_LR=3e-5                                              # --critic_lr
+ACTOR_LR=1e-5                                               # --actor_lr
+CRITIC_LR=1e-4                                              # --critic_lr
 WEIGHT_DECAY=1e-4                                           # --weight_decay
 GRAD_CLIP=1.0                                               # --grad_clip
 
-ENTROPY_COEF=0.005                                           # --entropy_coef：初期可稍微调大(如 0.01)鼓励探索
+ENTROPY_COEF=0.0                                           # --entropy_coef：初期可稍微调大(如 0.01)鼓励探索
 VALUE_LOSS_COEF=0.5                                         # --value_loss_coef
-YAW_LOSS_COEF=0.05                                           # --yaw_loss_coef
+YAW_LOSS_COEF=0.1                                           # --yaw_loss_coef
 GAMMA=0.99                                                  # --gamma
 LAM=0.95                                                    # --lam
 
@@ -42,7 +42,6 @@ FREEZE_CRITIC_ITERS=0                                     # --freeze_critic_iter
 
 CLIP_PARAM=0.2
 PPO_EPOCHS=4
-FREEZE_ENCODER_ITERS=10000
 INIT_LOG_STD=-1.6
 
 # -------------------------- 数据增强 (Dropout) -------------------------------
@@ -51,8 +50,8 @@ USE_DROPOUT=true
 
 # ------------------------------- 日志 / W&B 参数 -------------------------------
 USE_WANDB=true                                              # --wandb：是否开启 W&B
-WANDB_PROJECT="camera-offline-parkour"                      # --wandb_project
-WANDB_RUN_NAME="rl-txl-0429"                                # --wandb_run_name
+WANDB_PROJECT="camera-offline-finetune"                      # --wandb_project
+WANDB_RUN_NAME="rl-txl-0503"                                # --wandb_run_name
 LOG_INTERVAL=10                                             # --log_interval
 
 # --------------------------- AppLauncher / Isaac 参数 -------------------------
@@ -92,7 +91,6 @@ RL_CMD=("${PYTHON_BIN}" "scripts/txl_student/train_student_rl.py"
 
     "--clip_param" "${CLIP_PARAM}"
     "--ppo_epochs" "${PPO_EPOCHS}"
-    "--freeze_encoder_iters" "${FREEZE_ENCODER_ITERS}"
     "--init_log_std" "${INIT_LOG_STD}"
     
     "--save_dir" "${SAVE_DIR}"
