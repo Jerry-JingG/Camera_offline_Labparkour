@@ -8,6 +8,17 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import collections
+import os
+import sys
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+PARKOUR_TASKS_ROOT = os.path.join(PROJECT_ROOT, "parkour_tasks")
+if PARKOUR_TASKS_ROOT not in sys.path:
+    sys.path.insert(0, PARKOUR_TASKS_ROOT)
 
 from isaaclab.app import AppLauncher
 from tqdm import tqdm
@@ -25,7 +36,7 @@ parser.add_argument("--video_length", type=int, default=500, help="Length of the
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
-parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
+parser.add_argument("--num_envs", type=int, default=256, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--use_pretrained_checkpoint",
@@ -49,7 +60,6 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import gymnasium as gym
-import os
 import time
 import torch
 
@@ -149,6 +159,22 @@ def main():
     lenbuffer = deque(maxlen=total_steps)
     num_waypoints_buffer = deque(maxlen=total_steps)
     edge_violation_buffer = deque(maxlen=total_steps)
+    num_waypoints_per_terrain = collections.defaultdict(list)
+
+    try:
+        terrain_types_tensor = env.unwrapped.scene.terrain.terrain_types
+    except AttributeError:
+        print("[Warning] Could not find terrain_types. Make sure the terrain generator exposes it.")
+        terrain_types_tensor = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+
+    terrain_names = {}
+    try:
+        sub_terrains = env.unwrapped.cfg.scene.terrain.terrain_generator.sub_terrains
+        for i, name in enumerate(sub_terrains.keys()):
+            terrain_names[i] = name
+    except Exception as e:
+        print(f"[Warning] Failed to map terrain names: {e}")
+
     cur_reward_sum = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
     cur_episode_length = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
     cur_time_from_start = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
@@ -177,7 +203,7 @@ def main():
                 obs[:, 6:8] = 1.5*yaw
                 # obs[:, num_prop+num_scan:num_prop+num_scan+num_priv_explicit] = estimator.inference(obs[:, :num_prop])
                 actions = policy(obs, hist_encoding=True, scandots_latent=depth_latent)
-        cur_goal_idx = base_parkour.cur_goal_idx.clone()
+        cur_goal_idx = base_parkour.cur_goal_idx.clone().view(-1)
         obs, rews, dones, extras = env.step(actions)
         if args_cli.video:
             timestep += 1
@@ -186,15 +212,24 @@ def main():
                 break
         
         edge_violation_buffer.extend(reward_feet_edge.feet_at_edge.sum(dim=1).float().cpu().numpy().tolist())
-        cur_reward_sum += rews
+        cur_reward_sum += rews.view(-1)
         cur_episode_length += 1
         cur_time_from_start += 1
         
-        new_ids = (dones > 0).nonzero(as_tuple=False)
-        rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
-        lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
-        num_waypoints_buffer.extend(cur_goal_idx[new_ids][:, 0].cpu().numpy().tolist())
-        cur_reward_sum[new_ids] = 0
+        done_indices = (dones > 0).nonzero(as_tuple=False).squeeze(-1)
+        if len(done_indices) > 0:
+            rewbuffer.extend(cur_reward_sum[done_indices].cpu().numpy().tolist())
+            lenbuffer.extend(cur_episode_length[done_indices].cpu().numpy().tolist())
+
+            waypoints = cur_goal_idx[done_indices].cpu().numpy().tolist()
+            num_waypoints_buffer.extend(waypoints)
+
+            done_terrain_ids = terrain_types_tensor[done_indices].cpu().numpy().tolist()
+            for t_id, wp in zip(done_terrain_ids, waypoints):
+                num_waypoints_per_terrain[t_id].append(wp)
+
+            cur_reward_sum[done_indices] = 0.0
+            cur_episode_length[done_indices] = 0.0
 
         # time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)
@@ -203,22 +238,40 @@ def main():
 
     # # close the simulator
     env.close()
-    rew_mean = statistics.mean(rewbuffer)
-    rew_std = statistics.stdev(rewbuffer)
+    print("\n" + "=" * 50)
+    print("EVALUATION RESULTS")
+    print("=" * 50)
 
-    len_mean = statistics.mean(lenbuffer)
-    len_std = statistics.stdev(lenbuffer)
+    if len(rewbuffer) > 0:
+        rew_mean = statistics.mean(rewbuffer)
+        rew_std = statistics.stdev(rewbuffer) if len(rewbuffer) > 1 else 0.0
+        print("Mean reward:              {:.2f} ± {:.2f}".format(rew_mean, rew_std))
 
-    num_waypoints_mean = np.mean(np.array(num_waypoints_buffer).astype(float)/7.0)
-    num_waypoints_std = np.std(np.array(num_waypoints_buffer).astype(float)/7.0)
+        len_mean = statistics.mean(lenbuffer)
+        len_std = statistics.stdev(lenbuffer) if len(lenbuffer) > 1 else 0.0
+        print("Mean episode length:      {:.2f} ± {:.2f}".format(len_mean, len_std))
+    else:
+        print("No episodes finished during evaluation.")
 
-    edge_violation_mean = np.mean(edge_violation_buffer)
-    edge_violation_std = np.std(edge_violation_buffer)
+    if len(num_waypoints_buffer) > 0:
+        num_waypoints_mean = np.mean(np.array(num_waypoints_buffer).astype(float) / 7.0)
+        num_waypoints_std = np.std(np.array(num_waypoints_buffer).astype(float) / 7.0)
+        print("Mean number of waypoints: {:.2f} ± {:.2f}".format(num_waypoints_mean, num_waypoints_std))
 
-    print("Mean reward: {:.2f}$\pm${:.2f}".format(rew_mean, rew_std))
-    print("Mean episode length: {:.2f}$\pm${:.2f}".format(len_mean, len_std))
-    print("Mean number of waypoints: {:.2f}$\pm${:.2f}".format(num_waypoints_mean, num_waypoints_std))
-    print("Mean edge violation: {:.2f}$\pm${:.2f}".format(edge_violation_mean, edge_violation_std))
+    if len(edge_violation_buffer) > 0:
+        edge_violation_mean = np.mean(edge_violation_buffer)
+        edge_violation_std = np.std(edge_violation_buffer)
+        print("Mean edge violation:      {:.2f} ± {:.2f}".format(edge_violation_mean, edge_violation_std))
+
+    if len(num_waypoints_per_terrain) > 0:
+        print("\n--- Completion Rate by Terrain Type ---")
+        for t_id, wps in sorted(num_waypoints_per_terrain.items()):
+            t_name = terrain_names.get(t_id, f"TerrainType_{t_id}")
+            mean_val = np.mean(np.array(wps) / 7.0)
+            std_val = np.std(np.array(wps) / 7.0)
+            print(f"{t_name:<18}: {mean_val:.2f} ± {std_val:.2f} (from {len(wps)} episodes)")
+
+    print("=" * 50)
 
 if __name__ == "__main__":
     # run the main function

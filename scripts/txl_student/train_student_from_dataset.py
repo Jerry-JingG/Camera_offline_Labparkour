@@ -12,14 +12,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import importlib.util
-import os
-import sys
 import time
-from collections import deque
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Deque, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -35,6 +30,7 @@ except ImportError:
 
 from utils.dropout_manager import CameraDropoutManager
 from transformerxl.student_policy import MultiModalStudentPolicy
+from transformerxl.temporal.txl import TransformerXLTemporal
 from utils.student_utils import SequenceAggregator, build_student_model
 
 
@@ -60,18 +56,33 @@ class TeacherDatasetStreamer:
         self.depth_hist_len = depth_hist_len
         self.depth_dtype = self.meta.get("depth_dtype", "uint16")
         self.depth_scale = float(self.meta.get("depth_scale", 1000.0))
-        self.camera_resolution = tuple(self.meta.get("camera_resolution", [64, 64]))
         shards_root = dataset_dir / "shards"
         self.shards: List[Path] = sorted(shards_root.glob("shard_*.npz"))
         if not self.shards:
             raise FileNotFoundError(f"No dataset shards found in {shards_root}")
         self.device = device
+
+        dataset_layout = infer_dataset_layout(self.shards[0])
+        self.proprio_dim = int(self.meta.get("num_prop", dataset_layout["num_prop"]))
+        self.action_dim = int(self.meta.get("action_dim", dataset_layout["action_dim"]))
+        self.extra_info_dim = int(self.meta.get("extra_info_dim", dataset_layout["extra_info_dim"]))
+        self.camera_resolution = tuple(
+            self.meta.get("camera_resolution", list(dataset_layout["camera_resolution"]))
+        )
+        self.meta.setdefault("num_prop", self.proprio_dim)
+        self.meta.setdefault("action_dim", self.action_dim)
+        self.meta.setdefault("extra_info_dim", self.extra_info_dim)
+        self.meta.setdefault("camera_resolution", list(self.camera_resolution))
+
         self.aggregator = SequenceAggregator(
             num_envs=self.num_envs,
             device=self.device,
             prop_hist_len=prop_hist_len,
             depth_hist_len=depth_hist_len,
             sequence_len=sequence_len,
+            num_prop=self.proprio_dim,
+            depth_shape=self.camera_resolution,  # type: ignore[arg-type]
+            extra_info_dim=self.extra_info_dim,
         )
 
         # Camera Dropout Augmentation
@@ -116,6 +127,8 @@ class TeacherDatasetStreamer:
                 for step_idx in range(num_steps):
                     current_obs_prop = obs_prop[step_idx]
                     depth_frame = self._convert_depth(depth[step_idx])
+                    if depth_frame.ndim == 4 and depth_frame.shape[1] == 1:
+                        depth_frame = depth_frame[:, 0]
 
                     extra_info = extra_infos[step_idx]
 
@@ -197,20 +210,13 @@ def build_student_from_dataset(
     depth_hist_len: int,
     mem_len: int,
 ) -> Tuple[MultiModalStudentPolicy, int]:
-    meta = streamer.meta
-    proprio_dim = int(meta.get("num_prop", 0))
-    action_dim = int(meta.get("action_dim", 0))
-    if proprio_dim <= 0 or action_dim <= 0:
-        infer_prop, infer_action = infer_dataset_dims(streamer.shards[0])
-        proprio_dim = infer_prop
-        action_dim = infer_action
-        meta.setdefault("num_prop", proprio_dim)
-        meta.setdefault("action_dim", action_dim)
-    camera_resolution = tuple(meta.get("camera_resolution", [64, 64]))
+    proprio_dim = streamer.proprio_dim
+    action_dim = streamer.action_dim
+    camera_resolution = streamer.camera_resolution
     model = build_student_model(
         proprio_dim=proprio_dim,
         action_dim=action_dim,
-        camera_resolution=camera_resolution,
+        camera_resolution=camera_resolution,  # type: ignore[arg-type]
         prop_hist_len=prop_hist_len,
         depth_hist_len=depth_hist_len,
         mem_len=mem_len,
@@ -219,11 +225,18 @@ def build_student_from_dataset(
     return model, action_dim
 
 
-def infer_dataset_dims(shard_path: Path) -> Tuple[int, int]:
+def infer_dataset_layout(shard_path: Path) -> Dict[str, object]:
     with np.load(shard_path, allow_pickle=False) as shard:
         obs_prop = shard["obs_prop"]
         action_teacher = shard["action_teacher"]
-        return int(obs_prop.shape[-1]), int(action_teacher.shape[-1])
+        extra_info = shard["extra_info"]
+        depth = shard["depth"]
+        return {
+            "num_prop": int(obs_prop.shape[-1]),
+            "action_dim": int(action_teacher.shape[-1]),
+            "extra_info_dim": int(extra_info.shape[-1]),
+            "camera_resolution": tuple(int(v) for v in depth.shape[-2:]),
+        }
 
 
 def save_checkpoint(
@@ -342,12 +355,21 @@ def run_training() -> None:
             streamer.dropout_manager.reset()
 
         # Initialize memory for TransformerXL segment recurrence
-        mems = None  # Will be populated after first batch
+        mems = None
+        mem_dones = None
 
         # 直接迭代 Batch (无需再组装 samples)
         for batch_data in streamer.iter_batches(max_sequences=args.max_sequences_per_epoch):
             batch_start = time.time()
-            metrics, mems = train_batch(model, optimizer, batch_data, device, args.grad_clip, mems=mems)
+            metrics, mems, mem_dones = train_batch(
+                model,
+                optimizer,
+                batch_data,
+                device,
+                args.grad_clip,
+                mems=mems,
+                mem_dones=mem_dones,
+            )
             batch_time = time.time() - batch_start
 
             # Accumulate metrics
@@ -374,6 +396,8 @@ def run_training() -> None:
                 wandb.log({
                     # train/ metrics
                     "train/loss": metrics["loss"],
+                    "train/action_loss": metrics["action_loss"],
+                    "train/yaw_loss": metrics["yaw_loss"],
                     "train/loss_std": loss_std,
                     "train/diff_rmse": metrics["diff_rmse"],
                     "train/rel_rmse": metrics["rel_rmse"],
@@ -435,6 +459,11 @@ def run_training() -> None:
             if use_wandb:
                 wandb.save(str(ckpt_path))
 
+    final_ckpt_path = save_dir / "student_final.pt"
+    save_checkpoint(final_ckpt_path, model, optimizer, args.num_epochs, global_step, streamer.meta)
+    if use_wandb:
+        wandb.save(str(final_ckpt_path))
+
     # Ensure wandb is properly closed
     if use_wandb:
         wandb.finish()
@@ -448,7 +477,8 @@ def train_batch(
     device: torch.device,
     grad_clip: float,
     mems: Optional[List[Tensor]] = None,
-) -> Tuple[Dict[str, float], Optional[List[Tensor]]]:
+    mem_dones: Optional[Tensor] = None,
+) -> Tuple[Dict[str, float], Optional[List[Tensor]], Optional[Tensor]]:
     """
     Train a single batch with stateful memory management.
 
@@ -464,8 +494,21 @@ def train_batch(
     dones = batch_data["dones"].to(device)  # [B, S]
     true_yaws = batch_data["extra_infos"].to(device)
 
-    # Use forward_with_mems for segment recurrence training
-    predictions, pred_yaws, new_mems = model.forward_with_mems(proprio, depth, mems=mems)
+    current_mem_len = mems[0].size(1) if mems else 0
+    if current_mem_len > 0:
+        if mem_dones is None:
+            raise ValueError("mem_dones must be provided when recurrent mems are carried across batches.")
+        mem_dones = mem_dones[:, -current_mem_len:]
+        full_dones = torch.cat([mem_dones, dones], dim=1)
+    else:
+        full_dones = dones
+
+    predictions, pred_yaws, new_mems = model.forward_with_mems(
+        proprio,
+        depth,
+        mems=mems,
+        full_dones=full_dones,
+    )
 
     action_loss = torch.nn.functional.mse_loss(predictions, teacher_actions)
     yaw_loss = torch.nn.functional.mse_loss(pred_yaws, true_yaws)
@@ -491,30 +534,20 @@ def train_batch(
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
 
-    """
-    原代码在 train batch中的mem处理存在缺陷: 如果只检查最后一个done, 如果最后一步环境done了, 清空该环境的mems
-    如果一个 Episode 在序列中间结束，在这个结束点之前的所有 Memory 对于下一个 Batch 来说都是污染数据，必须全部清除，而不仅仅是检查最后一步。
-    """
+    next_mems: Optional[List[Tensor]] = None
+    next_mem_dones: Optional[Tensor] = None
     if new_mems is not None:
-        # dones shape: [num_envs, Seq_Len]
-        # new_mems shape: [num_layers, num_envs, Mem_Len, D_Model]
-        batch_size = dones.shape[0]
-
-        for b in range(batch_size):
-            # 找到该环境在当前序列中所有 done 的位置
-            done_indices = torch.nonzero(dones[b])
-
-            if done_indices.numel() > 0:
-                # 找到最后一个 done 的索引
-                last_done_idx = done_indices.max().item()
-
-                # 清空该位置及之前的记忆
-                # 下一个 Batch 将从 last_done_idx + 1 的上下文开始继续
-                for layer_mem in new_mems:
-                    layer_mem[b, :last_done_idx + 1, :] = 0.0
+        next_mems = TransformerXLTemporal.detach_mems(new_mems)
+        next_mem_len = next_mems[0].size(1) if next_mems else 0
+        if next_mem_len > 0:
+            next_mem_dones = full_dones[:, -next_mem_len:].detach().clone()
+        else:
+            next_mem_dones = dones.new_empty(dones.size(0), 0)
 
     metrics = {
         "loss": float(loss.item()),
+        "action_loss": float(action_loss.item()),
+        "yaw_loss": float(yaw_loss.item()),
         "diff_rmse": diff_rmse,
         "rel_rmse": rel_rmse,
         "grad_norm": grad_norm,
@@ -522,7 +555,7 @@ def train_batch(
         "teacher_action_rms": teacher_action_rms,
         "teacher_action_abs_max": teacher_action_abs_max,
     }
-    return metrics, new_mems
+    return metrics, next_mems, next_mem_dones
 
 
 if __name__ == "__main__":

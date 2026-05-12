@@ -155,7 +155,7 @@ def main() -> None:
     obs, extras = vec_env.get_observations()
     dones_bool = torch.zeros(vec_env.num_envs, device=device, dtype=torch.bool)
     step = 0
-
+    import cv2
     from isaaclab.utils.math  import euler_xyz_from_quat, wrap_to_pi
     base_parkour = vec_env.unwrapped.parkour_manager.get_term("base_parkour")
 
@@ -173,6 +173,22 @@ def main() -> None:
         if dropout_manager:
             dropout_manager.reset_env(dones_bool)
             dropout_manager.update(depth_image=depth_image, obs_prop=obs_prop)
+
+        if args.num_envs == 1:
+            vis_tensor = depth_image.detach().cpu()
+            if vis_tensor.ndim == 4:
+                vis_tensor = vis_tensor[0, 0]
+            elif vis_tensor.ndim == 3:
+                vis_tensor = vis_tensor[0]
+
+            img_np = vis_tensor.numpy()
+
+            grid_img = img_np + 0.5
+
+            grid_img = cv2.resize(grid_img, (0, 0), fx=3.0, fy=3.0, interpolation=cv2.INTER_NEAREST)
+
+            cv2.imshow("Collect Debug (Depth)", grid_img)
+            cv2.waitKey(1)
 
         student_action = runner.act(obs_prop, depth_image, prev_done=dones_bool)
 

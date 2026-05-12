@@ -276,7 +276,7 @@ def parse_args():
     p.add_argument("--yaw_loss_coef",     type=float, default=1.0)
     p.add_argument("--gamma",             type=float, default=0.99)
     p.add_argument("--lam",               type=float, default=0.95)
-    p.add_argument("--normalize_adv",     action="store_true", default=True)
+    p.add_argument("--normalize_adv",     action="store_true", default=False)
 
     p.add_argument("--clip_param",        type=float, default=0.2,  help="PPO clip epsilon")
     p.add_argument("--ppo_epochs",    type=int,   default=4,    help="PPO update epochs per rollout")

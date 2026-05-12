@@ -81,14 +81,24 @@ class MultiModalStudentPolicy(nn.Module):
             nn.Linear(256, 2)
         )
 
-    def forward(self, proprio_seq: Tensor, depth_seq: Tensor, dones: Optional[Tensor]) -> Tensor:
+    def forward(
+        self,
+        proprio_seq: Tensor,
+        depth_seq: Tensor,
+        full_dones: Optional[Tensor] = None,
+    ) -> Tensor:
         """
         Original simple forward (stateless).
         Args:
             proprio_seq: Tensor[B, S, prop_hist_len * proprio_dim]
             depth_seq: Tensor[B, S, depth_hist_len, H, W]
         """
-        actions, _ = self.forward_with_mems(proprio_seq, depth_seq, mems=None, dones=dones)
+        actions, _, _ = self.forward_with_mems(
+            proprio_seq,
+            depth_seq,
+            mems=None,
+            full_dones=full_dones,
+        )
         return actions
 
     def forward_with_mems(

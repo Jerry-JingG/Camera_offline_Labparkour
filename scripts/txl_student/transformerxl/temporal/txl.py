@@ -109,8 +109,8 @@ class TransformerXLTemporal(torch.nn.Module):
             base_mask = k_pos > q_pos                      # [S, K]
 
             """rl训练时保留, dagger训练时注释掉"""
-            window_mask = (q_pos - k_pos) > self.mem_len
-            base_mask = base_mask | window_mask
+            # window_mask = (q_pos - k_pos) > self.mem_len
+            # base_mask = base_mask | window_mask
 
             # 7. 合并：因果掩码 | 回合阻断掩码 -> [Batch, 1, seq_len, k_len]
             custom_mask = base_mask.unsqueeze(0).unsqueeze(0).expand(batch, 1, seq_len, k_len).clone()

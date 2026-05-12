@@ -340,21 +340,40 @@ def main():  # noqa: C901
     # VecEnvWrapper 负责桥接 Isaac 环境与 RSL-RL runner 的接口。
     vec_env = ParkourRslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    # 创建 OnPolicyRunner，用于载入教师策略与估计器（privileged states 估计器）。
+    # 创建 OnPolicyRunner，用于载入教师策略。
     runner = OnPolicyRunnerWithExtractor(vec_env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     runner.load(resume_path, load_optimizer=False)
     policy = runner.get_inference_policy(device=vec_env.device)
-    estimator = runner.get_estimator_inference_policy(device=vec_env.device)
 
     estimator_cfg = agent_cfg.to_dict()["estimator"]
     num_prop = estimator_cfg["num_prop"]
-    num_scan = estimator_cfg["num_scan"]
-    num_priv_explicit = estimator_cfg["num_priv_explicit"]
-    priv_start = num_prop + num_scan
-    priv_end = priv_start + num_priv_explicit
+    action_dim = int(vec_env.num_actions)
 
     # 获取首次观测，同时初始化 episode 相关计数器。
     obs, extras = vec_env.get_observations()
+    initial_depth = extras["observations"].get("depth_camera")
+    if initial_depth is None:
+        raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
+    if initial_depth.dim() == 4 and initial_depth.shape[1] == 1:
+        initial_depth = initial_depth.squeeze(1)
+
+    if resume_dataset and existing_meta:
+        compatibility_checks = {
+            "task": args_cli.task,
+            "num_envs": args_cli.num_envs,
+            "num_prop": int(num_prop),
+            "action_dim": action_dim,
+            "camera_resolution": list(initial_depth.shape[-2:]),
+        }
+        mismatches = []
+        for key, expected_value in compatibility_checks.items():
+            existing_value = existing_meta.get(key)
+            if existing_value is not None and existing_value != expected_value:
+                mismatches.append(f"{key}: existing={existing_value}, current={expected_value}")
+        if mismatches:
+            mismatch_text = "; ".join(mismatches)
+            raise ValueError(f"Resume dataset metadata mismatch: {mismatch_text}")
+
     episode_ids = torch.arange(vec_env.num_envs, device=vec_env.device, dtype=torch.long)
     next_episode_id = episode_ids[-1].item() + 1
     step_in_episode = torch.zeros(vec_env.num_envs, device=vec_env.device, dtype=torch.long)
@@ -408,6 +427,8 @@ def main():  # noqa: C901
             depth_image = extras["observations"].get("depth_camera")
             if depth_image is None:
                 raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
+            if depth_image.dim() == 4 and depth_image.shape[1] == 1:
+                depth_image = depth_image.squeeze(1)
 
             """ observation扰动逻辑 """
             if args_cli.noised_observation:
@@ -459,15 +480,10 @@ def main():  # noqa: C901
                 cv2.waitKey(1)
 
             obs_prop = obs[:, :num_prop].clone()
-            obs_est = obs
-            priv_est = estimator(obs_est[:, :num_prop])
-            obs_est[:, priv_start:priv_end] = priv_est
-
             _ , _, yaw = euler_xyz_from_quat(base_parkour.robot.data.root_quat_w)
             current_yaw = wrap_to_pi(yaw)
             obs_prop[:, 6] = -current_yaw
             obs_prop[:, 7] = 0
-            obs_prop[:, 12] = dones_bool.float()
             extra_info = torch.cat([base_parkour.target_yaw.clone().unsqueeze(-1), base_parkour.next_target_yaw.clone().unsqueeze(-1)], dim=-1)
 
             if args_cli.use_dropout:
@@ -476,36 +492,36 @@ def main():  # noqa: C901
 
             obs_prop_cpu = obs_prop.detach().cpu().numpy().astype(np.float32)
 
-            actions = policy(obs_est, hist_encoding=True)
-            actions_cpu = actions.detach().cpu().numpy().astype(np.float32)
+            teacher_actions = policy(obs, hist_encoding=True)
+            teacher_actions_cpu = teacher_actions.detach().cpu().numpy().astype(np.float32)
+            actions_to_env = teacher_actions
 
             """ 对env施加扰动后的动作从而到达特殊状态, 采集未扰动的action作为label """
             if args_cli.noised_action:
                 # 考虑了向量化环境，生成一个随机掩码，决定哪些环境在这个 step 使用噪声
                 use_noise_mask = torch.rand(vec_env.num_envs, device=vec_env.device) < perturb_prob
                 if use_noise_mask.any():
-                    noise = torch.randn_like(actions) * noise_scale
+                    noise = torch.randn_like(actions_to_env) * noise_scale
                     # 只对被选中的环境添加噪声
-                    actions = actions + (noise * use_noise_mask.unsqueeze(-1))
+                    actions_to_env = actions_to_env + (noise * use_noise_mask.unsqueeze(-1))
 
             # 环境前进一步，返回新的观测、奖励与终止标记。
-            obs_next, rews, dones, extras = vec_env.step(actions)
+            obs_next, rews, dones, extras = vec_env.step(actions_to_env)
             rews_cpu = rews.detach().cpu().numpy().astype(np.float32)
             dones_bool = dones.squeeze(-1).bool()
 
             # 将当前步的数据压入缓冲，待达到 shard 后统一写盘。
             buffer["obs_prop"].append(obs_prop_cpu)
-            buffer["action_teacher"].append(actions_cpu)
+            buffer["action_teacher"].append(teacher_actions_cpu)
             buffer["reward"].append(rews_cpu)
             buffer["done"].append(dones_bool.cpu().numpy())
             buffer["episode_id"].append(episode_ids.detach().cpu().numpy())
             buffer["step_in_episode"].append(step_in_episode.detach().cpu().numpy())
             buffer["depth"].append(convert_depth(depth_image, args_cli.depth_dtype, args_cli.depth_scale))
             buffer["extra_info"].append(extra_info.cpu().numpy())
-            buffer["priv_estimate"].append(priv_est.detach().cpu().numpy().astype(np.float32))
 
             obs_stats.update(obs_prop_cpu)
-            action_stats.update(actions_cpu)
+            action_stats.update(teacher_actions_cpu)
 
             steps_in_buffer += 1
             total_iterations += 1
@@ -567,6 +583,9 @@ def main():  # noqa: C901
     meta = {
         "task": args_cli.task,
         "num_envs": args_cli.num_envs,
+        "num_prop": int(num_prop),
+        "action_dim": action_dim,
+        "extra_info_dim": 2,
         "total_steps": total_recorded_steps,
         "dataset_format": args_cli.dataset_format,
         "depth_dtype": args_cli.depth_dtype,
