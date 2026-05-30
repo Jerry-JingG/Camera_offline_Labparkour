@@ -293,8 +293,8 @@ def parse_args():
     p.add_argument("--freeze_critic_iters", type=int, default=0)
 
     # ── student architecture ───────────────────────────────────────────────────
-    p.add_argument("--prop_hist_len",  type=int, default=3)
-    p.add_argument("--depth_hist_len", type=int, default=4)
+    p.add_argument("--prop_hist_len",  type=int, default=1)
+    p.add_argument("--depth_hist_len", type=int, default=1)
 
     # ── augmentation ───────────────────────────────────────────────────────────
     p.add_argument("--use_dropout", action="store_true")
@@ -460,7 +460,7 @@ def main():  # noqa: C901
     current_returns = torch.zeros(args.num_envs, device=device)
     current_lengths = torch.zeros(args.num_envs, device=device)
     dones_bool = torch.zeros(args.num_envs, dtype=torch.bool, device=device)
-    last_m_dones = None
+    mem_dones = None
 
     base_parkour = vec_env.unwrapped.parkour_manager.get_term("base_parkour")
     num_goals = int(getattr(base_parkour, "num_goals", 0))
@@ -574,7 +574,7 @@ def main():  # noqa: C901
             p.requires_grad_(not critic_frozen)
 
         N, S = advantages.shape
-        full_dones = torch.cat([last_m_dones, rl_buffer.dones], dim=1) if last_m_dones is not None else rl_buffer.dones.clone()
+        full_dones = torch.cat([mem_dones, rl_buffer.dones], dim=1) if mem_dones is not None else rl_buffer.dones.clone()
         final_epoch_mems = None
         target_kl = 0.1
         early_stop = False
@@ -649,7 +649,7 @@ def main():  # noqa: C901
         #  (D)  Maintain memory consistency between training and inference.
         # ────────────────────────────────────────────────────────────────────
         train_mems =[m.detach() for m in final_epoch_mems] if final_epoch_mems else None
-        last_m_dones = rl_buffer.dones.clone()
+        mem_dones = rl_buffer.dones.clone()
         # student_runner.mems = [m.detach() for m in train_mems]
 
         # ────────────────────────────────────────────────────────────────────

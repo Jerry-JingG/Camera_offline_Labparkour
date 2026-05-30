@@ -69,21 +69,18 @@ class UnitreeGo2TeacherCamParkourEnvCfg_PLAY(UnitreeGo2TeacherParkourEnvCfg_PLAY
 @configclass
 class UnitreeGo2TeacherCamParkourEnvCfg_COLLECT(UnitreeGo2TeacherParkourEnvCfg):
     """扰动配置: 保留了域随机化项以拓宽数据集coverage"""
-    scene: ParkourTeacherCamSceneCfg = ParkourTeacherCamSceneCfg(num_envs=16, env_spacing=1.0)
+    scene: ParkourTeacherCamSceneCfg = ParkourTeacherCamSceneCfg(num_envs=64, env_spacing=1.0)
     observations: TeacherWithCameraObservationsCfg = TeacherWithCameraObservationsCfg()
 
     def __post_init__(self):
         super().__post_init__()
-        self.scene.num_envs = 16
+        self.scene.num_envs = 64
         # self.parkours.base_parkour.debug_vis = True
         # self.commands.base_velocity.debug_vis = True
 
         if self.scene.terrain.terrain_generator is not None:
             self.scene.terrain.terrain_generator.num_rows = 5
-            self.scene.terrain.terrain_generator.num_cols = 5
-
-        # for key, sub_terrain in self.scene.terrain.terrain_generator.sub_terrains.items():
-        #     sub_terrain.noise_range = (0.02, 0.02)
+            self.scene.terrain.terrain_generator.num_cols = 5  # 训练环境未删去flat地形，num_cols应为5的整数倍
 
         # 恢复相机位置随机化（TeacherParkourEnvCfg中被禁用）
         self.events.random_camera_position = EventTerm(

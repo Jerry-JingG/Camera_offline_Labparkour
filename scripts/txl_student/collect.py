@@ -44,8 +44,6 @@ import cv2
 from isaaclab.app import AppLauncher
 
 # 本地导入
-import cli_args  # isort: skip
-
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -54,10 +52,11 @@ PARKOUR_TASKS_ROOT = os.path.join(PROJECT_ROOT, "parkour_tasks")
 if PARKOUR_TASKS_ROOT not in sys.path:
     sys.path.insert(0, PARKOUR_TASKS_ROOT)
 
-RSL_RL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "rsl_rl"))
+RSL_RL_DIR = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl")
 if RSL_RL_DIR not in sys.path:
     sys.path.insert(0, RSL_RL_DIR)
 
+import cli_args  # isort: skip
 
 def build_arg_parser() -> argparse.ArgumentParser:
     """构建命令行解析器，兼顾 RSL-RL 与 AppLauncher 的公共参数。"""
@@ -298,7 +297,7 @@ def main():  # noqa: C901
     import gymnasium as gym
     from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
     from isaaclab.utils.assets import retrieve_file_path
-    from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
+    # from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
     from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
     from modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
     from vecenv_wrapper import ParkourRslRlVecEnvWrapper
@@ -316,11 +315,7 @@ def main():  # noqa: C901
 
     # 与训练/回放脚本相同，自动解析教师策略 checkpoint。
     log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
-    if args_cli.use_pretrained_checkpoint:
-        resume_path = get_published_pretrained_checkpoint("rsl_rl", args_cli.task)
-        if not resume_path:
-            raise RuntimeError("未找到可用的预训练教师 checkpoint。")
-    elif args_cli.checkpoint:
+    if args_cli.checkpoint:
         resume_path = retrieve_file_path(args_cli.checkpoint)
     else:
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
@@ -445,39 +440,6 @@ def main():  # noqa: C901
                     depth_image += (depth_noise * mask_expanded)
                     """image_features的返回值经过了归一化, 范围是(-0.5, 0.5), 所以-0.5才表示深度为0!!!"""
                     depth_image = torch.clamp(depth_image, min=-0.5)
-
-            if args_cli.debug_vis:
-                # 1. 准备数据: [16, H, W]
-                vis_tensor = depth_image[:16].detach().cpu()
-                if vis_tensor.ndim == 4:
-                    vis_tensor = vis_tensor.squeeze(1)
-
-                depth_images_np = vis_tensor.numpy()
-
-                # 还原可视化: 原数据范围 [-0.5, 0.5]
-                # 加 0.5 变回 [0.0, 1.0] 区间，这样 0m=黑, max=白
-                depth_images_prep = []
-                for img in depth_images_np:
-                    img_display = img + 0.5
-                    depth_images_prep.append(img_display)
-
-                # 2. 拼接网格
-                rows = []
-                ncols = 4
-                for i in range(0, 16, ncols):
-                    batch = depth_images_prep[i:i+ncols]
-                    # Horizontal Stack
-                    row = np.hstack(batch)
-                    rows.append(row)
-
-                # Vertical Stack
-                grid_img = np.vstack(rows)
-
-                # 放大显示
-                grid_img = cv2.resize(grid_img, (0, 0), fx=3.0, fy=3.0, interpolation=cv2.INTER_NEAREST)
-
-                cv2.imshow("Collect Debug (Depth)", grid_img)
-                cv2.waitKey(1)
 
             obs_prop = obs[:, :num_prop].clone()
             _ , _, yaw = euler_xyz_from_quat(base_parkour.robot.data.root_quat_w)

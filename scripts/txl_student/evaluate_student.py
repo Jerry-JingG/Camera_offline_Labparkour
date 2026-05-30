@@ -59,8 +59,8 @@ def parse_args_eval() -> argparse.Namespace:
     )
     parser.add_argument("--num_envs", type=int, default=256, help="Number of parallel environments for evaluation.")
     parser.add_argument("--total_steps", type=int, default=2000, help="Number of steps to evaluate.")
-    parser.add_argument("--prop_hist_len", type=int, default=3, help="History length for proprio tokens.")
-    parser.add_argument("--depth_hist_len", type=int, default=4, help="History length for depth tokens.")
+    parser.add_argument("--prop_hist_len", type=int, default=1, help="History length for proprio tokens.")
+    parser.add_argument("--depth_hist_len", type=int, default=1, help="History length for depth tokens.")
     parser.add_argument("--mem_len", type=int, default=64, help="TransformerXL memory length (S).")
     parser.add_argument("--use_dropout", action="store_true", default=False, help="Simulate camera dropout.")
 

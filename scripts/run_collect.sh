@@ -5,15 +5,15 @@ set -euo pipefail
 
 # ------------------------------- 核心采集参数 ---------------------------------
 TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Collect-v0"  # --task：需要采集的 Gym 任务名
-NUM_ENVS=512                                                    # --num_envs：并行环境数量
+NUM_ENVS=128                                                    # --num_envs：并行环境数量
 
 
 # shard_size需要为train_student中sequence_length的整数倍!
 
-TOTAL_STEPS=5120                                               # --total_steps：总采集步数（一次 step 全部 env 同步计数）
+TOTAL_STEPS=10240                                               # --total_steps：总采集步数（一次 step 全部 env 同步计数）
 SHARD_SIZE=1024                                                # --shard_size：每个数据分片包含的 step 数
 
-OUTPUT_DIR="outputs/datasets/collection_clean"                # --out：数据输出目录
+OUTPUT_DIR="outputs/datasets/collection_clean_pro"                # --out：数据输出目录
 DEPTH_ENCODER_CKPT=""                                          # --depth-encoder-checkpoint：学生深度编码器权重（可为空）
 DATASET_FORMAT="npz"                                           # --dataset-format：数据格式，目前仅支持 npz
 DEPTH_DTYPE="float32"                                          # --depth-dtype：深度图保存精度（float32 或 uint16）
@@ -25,7 +25,7 @@ USE_PRETRAINED_FLAG=false                                      # --use_pretraine
 CHECKPOINT_PATH="logs/rsl_rl/unitree_go2_parkour/260428/model_49999.pt"  # --checkpoint：本地 checkpoint 路径
 RESUME_DATASET_FLAG=false                                      # --resume_dataset：若目录存在是否继续追加采集
 
-DEBUG_VIS=true                                                 # --debug_vis：开启深度图实时可视化窗口(仅显示前16个环境)
+DEBUG_VIS=false                                                 # --debug_vis：开启深度图实时可视化窗口(仅显示前16个环境)
 USE_DROPOUT=false                                               # --use_dropout：采集相机掉线任务的数据
 
 # ------------------------------- RSL-RL 额外参数 --------------------------------

@@ -95,8 +95,9 @@ class TeacherDatasetStreamer:
                 device=self.device,
                 dt=dt,
                 prob_start_offline=0.0,
-                online_duration_range=(2.0, 20.0),
-                offline_duration_range=(1.0, 10.0)
+                prob_cam_offline=0.5,
+                online_duration_range=(2.0, 10.0),
+                offline_duration_range=(1.0, 5.0)
             )
 
     @staticmethod
@@ -180,11 +181,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=str, required=True, help="Path to collect.py output directory.")
     parser.add_argument("--student_checkpoint", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda:0", help="Training device (e.g., cuda:0 or cpu).")
-    parser.add_argument("--num_epochs", type=int, default=500, help="Number of passes over the dataset.")
+    parser.add_argument("--num_epochs", type=int, default=1000, help="Number of passes over the dataset.")
     # parser.add_argument("--batch_size", type=int, default=8)  batch_size implicitly equals num_envs in dataset we collected
     parser.add_argument("--sequence_length", type=int, default=64, help="TransformerXL segment length during training (should match mem_len).")
-    parser.add_argument("--prop_hist_len", type=int, default=3, help="History length (in steps) for proprio tokens.")
-    parser.add_argument("--depth_hist_len", type=int, default=4, help="Number of stacked depth frames per sample.")
+    parser.add_argument("--prop_hist_len", type=int, default=1, help="History length (in steps) for proprio tokens.")
+    parser.add_argument("--depth_hist_len", type=int, default=1, help="Number of stacked depth frames per sample.")
     parser.add_argument("--learning_rate", type=float, default=3e-4, help="Optimizer learning rate.")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for AdamW optimizer.")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping threshold (L2 norm).")
@@ -355,19 +356,19 @@ def run_training() -> None:
             streamer.dropout_manager.reset()
 
         # Initialize memory for TransformerXL segment recurrence
-        mems = None
+        train_mems = None
         mem_dones = None
 
         # 直接迭代 Batch (无需再组装 samples)
         for batch_data in streamer.iter_batches(max_sequences=args.max_sequences_per_epoch):
             batch_start = time.time()
-            metrics, mems, mem_dones = train_batch(
+            metrics, train_mems, mem_dones = train_batch(
                 model,
                 optimizer,
                 batch_data,
                 device,
                 args.grad_clip,
-                mems=mems,
+                train_mems=train_mems,
                 mem_dones=mem_dones,
             )
             batch_time = time.time() - batch_start
@@ -420,11 +421,6 @@ def run_training() -> None:
                     "progress/sequences_this_epoch": epoch_sequences,
                 }, step=global_step)
 
-            if args.log_interval > 0 and num_updates % args.log_interval == 0:
-                avg_loss = np.mean(epoch_losses)
-                dropout_rate = batch_data.get("dropout_rate", 0.0)
-                print(f"[epoch {epoch}] step {global_step} | updates={num_updates} | avg_loss={avg_loss:.6f} | dropout={dropout_rate:.1%}")
-
         epoch_time = time.time() - epoch_start
 
         # Compute epoch-level statistics
@@ -476,7 +472,7 @@ def train_batch(
     batch_data: Dict[str, Tensor],
     device: torch.device,
     grad_clip: float,
-    mems: Optional[List[Tensor]] = None,
+    train_mems: Optional[List[Tensor]] = None,
     mem_dones: Optional[Tensor] = None,
 ) -> Tuple[Dict[str, float], Optional[List[Tensor]], Optional[Tensor]]:
     """
@@ -494,19 +490,12 @@ def train_batch(
     dones = batch_data["dones"].to(device)  # [B, S]
     true_yaws = batch_data["extra_infos"].to(device)
 
-    current_mem_len = mems[0].size(1) if mems else 0
-    if current_mem_len > 0:
-        if mem_dones is None:
-            raise ValueError("mem_dones must be provided when recurrent mems are carried across batches.")
-        mem_dones = mem_dones[:, -current_mem_len:]
-        full_dones = torch.cat([mem_dones, dones], dim=1)
-    else:
-        full_dones = dones
+    full_dones = torch.cat([mem_dones, dones], dim=1) if mem_dones is not None else dones.clone()
 
-    predictions, pred_yaws, new_mems = model.forward_with_mems(
+    predictions, pred_yaws, new_train_mems = model.forward_with_mems(
         proprio,
         depth,
-        mems=mems,
+        mems=train_mems,
         full_dones=full_dones,
     )
 
@@ -535,14 +524,9 @@ def train_batch(
     optimizer.step()
 
     next_mems: Optional[List[Tensor]] = None
-    next_mem_dones: Optional[Tensor] = None
-    if new_mems is not None:
-        next_mems = TransformerXLTemporal.detach_mems(new_mems)
-        next_mem_len = next_mems[0].size(1) if next_mems else 0
-        if next_mem_len > 0:
-            next_mem_dones = full_dones[:, -next_mem_len:].detach().clone()
-        else:
-            next_mem_dones = dones.new_empty(dones.size(0), 0)
+    if new_train_mems is not None:
+        next_mems = TransformerXLTemporal.detach_mems(new_train_mems)
+    next_mem_dones=dones.clone()
 
     metrics = {
         "loss": float(loss.item()),

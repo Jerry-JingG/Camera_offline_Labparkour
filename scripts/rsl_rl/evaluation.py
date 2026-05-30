@@ -44,6 +44,7 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument("--use_dropout", action="store_true", default=False, help="Simulate camera dropout for parkour student evaluation.")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -64,6 +65,7 @@ import time
 import torch
 
 from scripts.rsl_rl.modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
+from scripts.txl_student.utils.dropout_manager import CameraDropoutManager
 
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.assets import retrieve_file_path
@@ -145,6 +147,22 @@ def main():
     else:
         policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
 
+    dropout_manager = None
+    if args_cli.use_dropout:
+        if agent_cfg.algorithm.class_name != "DistillationWithExtractor":
+            print("[Warning] --use_dropout is only supported for DistillationWithExtractor student policies; ignoring.")
+        else:
+            dropout_manager = CameraDropoutManager(
+                num_envs=env.num_envs,
+                device=env.device,
+                dt=float(env.unwrapped.step_dt),
+                prob_start_offline=0.0,
+                prob_cam_offline=1.0,
+                online_duration_range=(5.0, 5.0),
+                offline_duration_range=(2.0, 2.0),
+            )
+            print("[Eval] Camera Dropout Simulation: ENABLED")
+
     dt = env.unwrapped.step_dt
     estimator_paras = agent_cfg.to_dict()["estimator"]
     num_prop = estimator_paras["num_prop"]
@@ -152,6 +170,7 @@ def main():
     num_priv_explicit = estimator_paras["num_priv_explicit"]
     # reset environment
     obs, extras = env.get_observations()
+    dones_bool = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
     timestep = 0
     # simulate environment
     total_steps = 1000
@@ -181,6 +200,8 @@ def main():
 
     reward_feet_edge = env.unwrapped.reward_manager.get_term_cfg("reward_feet_edge").func
     base_parkour = env.unwrapped.parkour_manager.get_term("base_parkour")
+    depth_latent = None
+    yaw = None
     # while simulation_app.is_running():
     for i in tqdm(range(1500)):
         start_time = time.time()
@@ -192,12 +213,19 @@ def main():
                 actions = policy(obs, hist_encoding = True)
             # env stepping
         else:
-            depth_camera = extras["observations"]['depth_camera'].to(env.device)
+            depth_camera = extras["observations"].get("depth_camera")
+            if depth_camera is None:
+                raise RuntimeError("Current task does not provide 'depth_camera' observations; please use a camera-enabled parkour task.")
+            depth_camera = depth_camera.to(env.device)
+            obs_student = obs[:, :num_prop].clone()
+            obs_student[:, 6:8] = 0
+            student_depth = depth_camera.clone() if dropout_manager is not None else depth_camera
+            if dropout_manager is not None:
+                dropout_manager.reset_env(dones_bool)
+                dropout_manager.update(depth_image=student_depth, obs_prop=obs_student)
             with torch.inference_mode():
-                if env.unwrapped.common_step_counter %5 == 0:
-                    obs_student = obs[:, :num_prop].clone()
-                    obs_student[:, 6:8] = 0
-                    depth_latent_and_yaw = depth_encoder(depth_camera, obs_student)
+                if depth_latent is None or yaw is None or env.unwrapped.common_step_counter %5 == 0:
+                    depth_latent_and_yaw = depth_encoder(student_depth, obs_student)
                     depth_latent = depth_latent_and_yaw[:, :-2]
                     yaw = depth_latent_and_yaw[:, -2:]
                 obs[:, 6:8] = 1.5*yaw
@@ -205,6 +233,7 @@ def main():
                 actions = policy(obs, hist_encoding=True, scandots_latent=depth_latent)
         cur_goal_idx = base_parkour.cur_goal_idx.clone().view(-1)
         obs, rews, dones, extras = env.step(actions)
+        dones_bool = dones.squeeze(-1).bool()
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video
@@ -216,7 +245,7 @@ def main():
         cur_episode_length += 1
         cur_time_from_start += 1
         
-        done_indices = (dones > 0).nonzero(as_tuple=False).squeeze(-1)
+        done_indices = dones_bool.nonzero(as_tuple=False).squeeze(-1)
         if len(done_indices) > 0:
             rewbuffer.extend(cur_reward_sum[done_indices].cpu().numpy().tolist())
             lenbuffer.extend(cur_episode_length[done_indices].cpu().numpy().tolist())

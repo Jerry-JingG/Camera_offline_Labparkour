@@ -62,8 +62,8 @@ def parse_args():
 
     # Model / Training
     parser.add_argument("--sequence_length", type=int, default=64)
-    parser.add_argument("--prop_hist_len", type=int, default=3)
-    parser.add_argument("--depth_hist_len", type=int, default=4)
+    parser.add_argument("--prop_hist_len", type=int, default=1)
+    parser.add_argument("--depth_hist_len", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--grad_clip", type=float, default=1.0)
@@ -191,7 +191,7 @@ def main():
     # 6. DAgger Loop
     # Important: 'train_mems' are persistent across batches to allow TBPTT
     train_mems: Optional[List[Tensor]] = None
-    last_m_dones = None
+    mem_dones = None
 
     # Stats buffers
     ep_returns = deque(maxlen=100)
@@ -309,7 +309,7 @@ def main():
         b_dones = batch_data["dones"].to(device)
         true_yaws = batch_data["extra_infos"].to(device)
 
-        full_dones = torch.cat([last_m_dones, b_dones], dim=1) if last_m_dones is not None else b_dones.clone()
+        full_dones = torch.cat([mem_dones, b_dones], dim=1) if mem_dones is not None else b_dones.clone()
 
         # Forward with segment recurrence
         pred_actions, pred_yaws, new_train_mems = student_model.forward_with_mems(
@@ -332,7 +332,7 @@ def main():
             train_mems = TransformerXLTemporal.detach_mems(new_train_mems)
         else:
             train_mems = None
-        last_m_dones = b_dones.clone()
+        mem_dones = b_dones.clone()
 
         # --- Logging ---
         dt = time.time() - iter_start

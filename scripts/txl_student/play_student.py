@@ -54,8 +54,8 @@ def parse_args_play() -> argparse.Namespace:
         help="Directory containing student_epoch_*.pt; used when --student_checkpoint is not provided.",
     )
     parser.add_argument("--num_envs", type=int, default=8, help="Number of parallel environments.")
-    parser.add_argument("--prop_hist_len", type=int, default=3, help="History length for proprio tokens.")
-    parser.add_argument("--depth_hist_len", type=int, default=4, help="History length for depth tokens.")
+    parser.add_argument("--prop_hist_len", type=int, default=1, help="History length for proprio tokens.")
+    parser.add_argument("--depth_hist_len", type=int, default=1, help="History length for depth tokens.")
     parser.add_argument("--mem_len", type=int, default=64, help="TransformerXL memory length (S).")
     parser.add_argument("--max_steps", type=int, default=2000, help="Maximum steps to run.")
     parser.add_argument("--use_dropout", action="store_true", default=False, help="Simulate camera dropout.")
