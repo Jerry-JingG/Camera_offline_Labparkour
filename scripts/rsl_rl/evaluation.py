@@ -70,7 +70,7 @@ from scripts.txl_student.utils.dropout_manager import CameraDropoutManager
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
+# from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 from parkour_tasks.extreme_parkour_task.config.go2.agents.parkour_rl_cfg import ParkourRslRlOnPolicyRunnerCfg
 
 from scripts.rsl_rl.vecenv_wrapper import ParkourRslRlVecEnvWrapper
@@ -98,12 +98,13 @@ def main():
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
-    if args_cli.use_pretrained_checkpoint:
-        resume_path = get_published_pretrained_checkpoint("rsl_rl", args_cli.task)
-        if not resume_path:
-            print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
-            return
-    elif args_cli.checkpoint:
+    # if args_cli.use_pretrained_checkpoint:
+    #     resume_path = get_published_pretrained_checkpoint("rsl_rl", args_cli.task)
+    #     if not resume_path:
+    #         print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
+    #         return
+    # el
+    if args_cli.checkpoint:
         resume_path = retrieve_file_path(args_cli.checkpoint)
     else:
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
@@ -180,12 +181,7 @@ def main():
     edge_violation_buffer = deque(maxlen=total_steps)
     num_waypoints_per_terrain = collections.defaultdict(list)
 
-    try:
-        terrain_types_tensor = env.unwrapped.scene.terrain.terrain_types
-    except AttributeError:
-        print("[Warning] Could not find terrain_types. Make sure the terrain generator exposes it.")
-        terrain_types_tensor = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
-
+    # terrain_types 是列号；真正的 sub-terrain 类别在 base_parkour.env_class 中。
     terrain_names = {}
     try:
         sub_terrains = env.unwrapped.cfg.scene.terrain.terrain_generator.sub_terrains
@@ -203,7 +199,7 @@ def main():
     depth_latent = None
     yaw = None
     # while simulation_app.is_running():
-    for i in tqdm(range(1500)):
+    for i in tqdm(range(2000)):
         start_time = time.time()
         # run everything in inference mode
         if agent_cfg.algorithm.class_name != "DistillationWithExtractor":
@@ -232,6 +228,7 @@ def main():
                 # obs[:, num_prop+num_scan:num_prop+num_scan+num_priv_explicit] = estimator.inference(obs[:, :num_prop])
                 actions = policy(obs, hist_encoding=True, scandots_latent=depth_latent)
         cur_goal_idx = base_parkour.cur_goal_idx.clone().view(-1)
+        cur_terrain_ids = base_parkour.env_class.clone().long().view(-1)
         obs, rews, dones, extras = env.step(actions)
         dones_bool = dones.squeeze(-1).bool()
         if args_cli.video:
@@ -253,7 +250,7 @@ def main():
             waypoints = cur_goal_idx[done_indices].cpu().numpy().tolist()
             num_waypoints_buffer.extend(waypoints)
 
-            done_terrain_ids = terrain_types_tensor[done_indices].cpu().numpy().tolist()
+            done_terrain_ids = cur_terrain_ids[done_indices].cpu().numpy().tolist()
             for t_id, wp in zip(done_terrain_ids, waypoints):
                 num_waypoints_per_terrain[t_id].append(wp)
 

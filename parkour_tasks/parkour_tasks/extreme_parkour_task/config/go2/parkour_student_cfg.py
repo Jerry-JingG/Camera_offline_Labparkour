@@ -88,8 +88,8 @@ class UnitreeGo2StudentParkourEnvCfg_EVAL(UnitreeGo2StudentParkourEnvCfg):
         self.commands.base_velocity.debug_vis = True
 
         if self.scene.terrain.terrain_generator is not None:
-            self.scene.terrain.terrain_generator.num_rows = 5
-            self.scene.terrain.terrain_generator.num_cols = 4
+            self.scene.terrain.terrain_generator.num_rows = 10
+            self.scene.terrain.terrain_generator.num_cols = 20
             self.scene.terrain.terrain_generator.random_difficulty = True
             self.scene.terrain.terrain_generator.difficulty_range = (0.0,1.0)
         self.events.randomize_rigid_body_com = None
@@ -114,6 +114,8 @@ class UnitreeGo2StudentParkourEnvCfg_PLAY(UnitreeGo2StudentParkourEnvCfg_EVAL):
         self.episode_length_s = 60.
 
         if self.scene.terrain.terrain_generator is not None:
+            self.scene.terrain.terrain_generator.num_rows = 5
+            self.scene.terrain.terrain_generator.num_cols = 4
             self.scene.terrain.terrain_generator.difficulty_range = (0.7,1.0)
         self.events.push_by_setting_velocity = None
         # for key, sub_terrain in self.scene.terrain.terrain_generator.sub_terrains.items():

@@ -168,14 +168,7 @@ def main() -> None:
     edge_violation_buffer = deque(maxlen=total_steps)
     num_waypoints_per_terrain = collections.defaultdict(list)
 
-    # 获取每个 env 的地形 ID (Shape: [num_envs])
-    try:
-        terrain_types_tensor = vec_env.unwrapped.scene.terrain.terrain_types
-    except AttributeError:
-        print("[Warning] Could not find terrain_types. Make sure the terrain generator exposes it.")
-        terrain_types_tensor = torch.zeros(vec_env.num_envs, dtype=torch.long, device=device)
-
-    # 尝试映射地形 ID 到字符串名字 (提取 active 的 sub_terrains)
+    # terrain_types 是列号；真正的 sub-terrain 类别在 base_parkour.env_class 中。
     terrain_names = {}
     try:
         sub_terrains = vec_env.unwrapped.cfg.scene.terrain.terrain_generator.sub_terrains
@@ -218,9 +211,10 @@ def main() -> None:
         # 预测 Action
         student_action = runner.act(obs_prop, depth_image, prev_done=dones_bool)
 
-        # Snapshot current goal index before step
+        # Snapshot episode metadata before step; reset may update it for done envs.
         if base_parkour is not None:
             cur_goal_idx = base_parkour.cur_goal_idx.clone().view(-1)
+            cur_terrain_ids = base_parkour.env_class.clone().long().view(-1)
 
         # 环境推演
         obs_next, rews, dones, extras = vec_env.step(student_action)
@@ -243,8 +237,8 @@ def main() -> None:
                 waypoints = cur_goal_idx[done_indices].cpu().numpy().tolist()
                 num_waypoints_buffer.extend(waypoints)
 
-                # 记录每种地形上跑了多少个waypoints
-                done_terrain_ids = terrain_types_tensor[done_indices].cpu().numpy().tolist()
+                # 记录每种真实 sub-terrain 类别上跑了多少个 waypoints
+                done_terrain_ids = cur_terrain_ids[done_indices].cpu().numpy().tolist()
                 for t_id, wp in zip(done_terrain_ids, waypoints):
                     num_waypoints_per_terrain[t_id].append(wp)
 
