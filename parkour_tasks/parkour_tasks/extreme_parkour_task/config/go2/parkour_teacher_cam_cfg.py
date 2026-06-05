@@ -79,8 +79,8 @@ class UnitreeGo2TeacherCamParkourEnvCfg_COLLECT(UnitreeGo2TeacherParkourEnvCfg):
         # self.commands.base_velocity.debug_vis = True
 
         if self.scene.terrain.terrain_generator is not None:
-            self.scene.terrain.terrain_generator.num_rows = 10
-            self.scene.terrain.terrain_generator.num_cols = 40  # 训练环境未删去flat地形，num_cols应为5的整数倍
+            self.scene.terrain.terrain_generator.num_rows = 5
+            self.scene.terrain.terrain_generator.num_cols = 5  # 训练环境未删去flat地形，num_cols应为5的整数倍
 
         # 恢复相机位置随机化（TeacherParkourEnvCfg中被禁用）
         self.events.random_camera_position = EventTerm(
