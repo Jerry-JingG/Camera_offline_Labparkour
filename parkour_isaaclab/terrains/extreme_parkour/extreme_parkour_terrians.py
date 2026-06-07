@@ -96,7 +96,6 @@ def parkour_gap_terrain(
         for i in range(num_goals - 2):
             rand_x = np.random.randint(dis_x_min, dis_x_max)
             dis_x += rand_x
-            # rand_y = np.random.randint(dis_y_min, dis_y_max)
             rand_y=0
             if not cfg.apply_flat:
                 height_field_raw[dis_x-gap_size//2 : dis_x+gap_size//2, :] = gap_depth
@@ -152,7 +151,6 @@ def parkour_hurdle_terrain(
 
         for i in range(num_goals-2):
             rand_x = np.random.randint(dis_x_min, dis_x_max)
-            # rand_y = np.random.randint(dis_y_min, dis_y_max)
             rand_y = 0
             dis_x += rand_x
             if not cfg.apply_flat:
@@ -206,7 +204,6 @@ def parkour_step_terrain(
         num_stones = num_goals - 2
         for i in range(num_stones):
             rand_x = np.random.randint(dis_x_min, dis_x_max)
-            # rand_y = np.random.randint(dis_y_min, dis_y_max)
             rand_y = 0
             if i < num_stones // 2:
                 stair_height += step_height
@@ -221,7 +218,6 @@ def parkour_step_terrain(
             goals[i+1] = [dis_x-rand_x//2, mid_y+rand_y]
             goal_heights[i+1] = stair_height
         final_dis_x = dis_x + np.random.randint(dis_x_min, dis_x_max)
-        # import ipdb; ipdb.set_trace()
         if final_dis_x > width_pixels:
             final_dis_x = width_pixels - 0.5 // cfg.horizontal_scale
         goals[-1] = [final_dis_x, mid_y]

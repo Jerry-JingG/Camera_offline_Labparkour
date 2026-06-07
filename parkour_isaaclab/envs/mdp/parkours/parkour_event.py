@@ -103,17 +103,25 @@ class ParkourEvent(ParkourTerm):
     def _update_command(self):
         """Re-target the current goal position to the current root state."""
         next_flag = self.reach_goal_timer > self.reach_goal_delay / self.simulation_time
+        self.cur_goal_idx[next_flag] += 1
+        # clamp: _gather_cur_goals(future=1) uses cur_goal_idx+1 as index into
+        # env_goals (shape [..., num_goals+num_future_goal_obs, ...]), so max safe
+        # value is env_goals.shape[1]-2 = num_goals+num_future_goal_obs-2
+        self.cur_goal_idx.clamp_(max=self.env_goals.shape[1] - 2)
+        # Debug visualization (must be after clamp to avoid index out of bounds)
         if self.debug_vis:
             tmp_mask = torch.nonzero(self.cur_goal_idx>0).squeeze(-1)
             if tmp_mask.numel() > 0:
-                self.future_goal_idx[tmp_mask, self.cur_goal_idx[tmp_mask]] = False
-        self.cur_goal_idx[next_flag] += 1
+                # Clamp indices to valid range for future_goal_idx (num_goals dimension)
+                valid_indices = torch.clamp(self.cur_goal_idx[tmp_mask], max=self.num_goals - 1)
+                self.future_goal_idx[tmp_mask, valid_indices] = False
         self.reach_goal_timer[next_flag] = 0
         robot_root_pos_w = self.robot.data.root_pos_w[:, :2] - self.env_origins[:, :2]
         self.reached_goal_ids = torch.norm(robot_root_pos_w - self.cur_goals[:, :2], dim=1) < self.next_goal_threshold
         reached_goal_idx = self.reached_goal_ids.nonzero(as_tuple=False).squeeze(-1)
         if reached_goal_idx.numel() > 0:
-            self.reach_goal_timer[reached_goal_idx] += 1
+            in_phase1 = self.cur_goal_idx[reached_goal_idx] < self.num_goals
+            self.reach_goal_timer[reached_goal_idx[in_phase1]] += 1
 
         self.target_pos_rel = self.cur_goals[:, :2] - robot_root_pos_w
         self.next_target_pos_rel = self.next_goals[:, :2] - robot_root_pos_w
@@ -134,17 +142,21 @@ class ParkourEvent(ParkourTerm):
 
     def _resample_command(self, env_ids: Sequence[int]):
         ## we are use reset_root_state events for initalize robot position in a subterrain
-        ## original robot root init position is (0,0) in the subterrain axis, so we subtracted off from current robot position 
+        ## original robot root init position is (0,0) in the subterrain axis, so we subtracted off from current robot position
 
         start_pos = self.env_origins[env_ids,:2] - \
                     torch.tensor((self.terrain.cfg.terrain_generator.size[1] + \
                                   self._reset_offset, 0)).to(self.device)
 
         self.dis_to_start_pos = torch.norm(start_pos - self.robot.data.root_pos_w[env_ids, :2], dim=1)
-        threshold = self.env.command_manager.get_command("base_velocity")[env_ids, 0] * self.episode_length_s
-        move_up = self.dis_to_start_pos > 0.8*threshold
-        move_down = self.dis_to_start_pos < 0.4*threshold
-
+        if self.cfg.use_phase2_curriculum and hasattr(self.env, "_pit_phase2_last_duration"):
+            last_p2_time = self.env._pit_phase2_last_duration[env_ids]
+            move_up = last_p2_time > self.cfg.phase2_upgrade_threshold
+            move_down = last_p2_time < self.cfg.phase2_downgrade_threshold
+        else:
+            threshold = self.env.command_manager.get_command("base_velocity")[env_ids, 0] * self.episode_length_s
+            move_up = self.dis_to_start_pos > 0.8*threshold
+            move_down = self.dis_to_start_pos < 0.4*threshold
         robot_root_pos_w = self.robot.data.root_pos_w[:, :2] - self.env_origins[:, :2]
         self.terrain.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
         # # Robots that solve the last level are sent to a random one
@@ -191,6 +203,8 @@ class ParkourEvent(ParkourTerm):
         self.metrics["how_far_from_start_point"] = self.dis_to_start_pos.to(device = 'cpu')
         self.metrics["track_progress"] = (self.cur_goal_idx.float() / self.num_goals).to(device='cpu')
         self.metrics["success_ratio"] = (self.metrics["track_progress"] > 0.7).float() # Percentage of envs reaching >70% progress
+        phase2_count_val = (self.cur_goal_idx >= self.num_goals).sum().float().item()
+        self.metrics["phase2_count"] = torch.full((self.num_envs,), phase2_count_val, device='cpu')
         
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first tome

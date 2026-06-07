@@ -75,4 +75,11 @@ class ParkourEventsCfg(ParkourTermCfg):
         = CURRENT_ARROW_MARKER_CFG.replace(prim_path="/Visuals/Command/current_arrow")
 
     future_arrow_visualizer_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
+
+    # --- Phase-2 curriculum ---
+    # When True, terrain level upgrade/downgrade is based on time spent in phase 2
+    # (cur_goal_idx >= num_goals) rather than distance traveled.
+    use_phase2_curriculum: bool = False
+    phase2_upgrade_threshold: float = 5.0   # seconds; upgrade if phase2 time > this
+    phase2_downgrade_threshold: float = 2.5  # seconds; downgrade if phase2 time < this
     current_arrow_visualizer_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)

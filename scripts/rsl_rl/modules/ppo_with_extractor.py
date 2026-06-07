@@ -75,6 +75,10 @@ class PPOWithExtractor(PPO):
         self.counter = 0
 
 
+    def init_storage(self, training_type, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
+        """Override to absorb the extra training_type arg added by OnPolicyRunnerWithExtractor."""
+        return super().init_storage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape)
+
     def act(self, obs, critic_obs, hist_encoding=False):
         if self.policy.is_recurrent:
             self.transition.hidden_states = self.policy.get_hidden_states()

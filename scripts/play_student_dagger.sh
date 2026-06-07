@@ -4,12 +4,12 @@
 set -euo pipefail
 
 TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Play-v0"
-STUDENT_CKPT="logs/rsl_rl/student_dagger_transformer/student-dagger-dropout-1-16/student_epoch_final.pt"
-NUM_ENVS=1 
+STUDENT_CKPT="logs/rsl_rl/student_dagger_transformer/student-dagger-dropout-1-32-pred-yaw/student_epoch_035100.pt"
+NUM_ENVS=16
 PROP_HIST_LEN=1
 DEPTH_HIST_LEN=1
 SEQUENCE_LENGTH=64
-MAX_STEPS=200          # 0 表示跑到窗口关闭
+MAX_STEPS=1000          # 0 表示跑到窗口关闭
 DEVICE_ARG="cuda:0"
 HEADLESS_FLAG=false     # GUI 模式设为 false；无界面设为 true
 
@@ -18,7 +18,7 @@ HEADLESS_FLAG=false     # GUI 模式设为 false；无界面设为 true
 # 用于与 MuJoCo C++ 推理结果进行对齐验证
 RECORD_DATA=true
 # 录制数据的输出路径 (二进制格式)
-RECORD_OUTPUT_PATH="/home/jing/IsaacLab/Camera_offline_Labparkour/obs_output/dagger_verify_data_v2.bin"
+RECORD_OUTPUT_PATH="/home/jing/IsaacLab/Camera_offline_Labparkour/obs_output/pred_yaw_verify_data.bin"
 # =====================================
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

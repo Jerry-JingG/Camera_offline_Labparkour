@@ -115,8 +115,8 @@ except ImportError:
             f.write(repr(obj))
 from parkour_tasks.extreme_parkour_task.config.go2.agents.parkour_rl_cfg import ParkourRslRlOnPolicyRunnerCfg
 from vecenv_wrapper import ParkourRslRlVecEnvWrapper
-# import isaaclab_tasks  # noqa: F401
 import parkour_tasks  # noqa: F401
+import robot_lab  # noqa: F401  -- registers RobotLab gym environments
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 from parkour_isaaclab.envs import (

@@ -15,13 +15,14 @@ import struct
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import importlib.util
 import numpy as np
 
 import torch
 
 from utils.camera_blackout_manager import CameraBlackoutManager
+from utils.dropout_manager import CameraDropoutManager
 
 from isaaclab.app import AppLauncher
 
@@ -268,54 +269,18 @@ class StudentOnlineRunner:
                     for _ in range(self.num_layers)
                 ]
 
-    # def debug_print_mems(self, step: int, env_id: int = 0) -> None:
-    #     """
-    #     打印指定环境的 TransformerXL 记忆状态，用于调试。
-        
-    #     Args:
-    #         step: 当前时间步
-    #         env_id: 要查看的环境 ID（默认为 0）
-    #     """
-    #     if env_id >= self.num_envs:
-    #         print(f"[debug_mems] env_id={env_id} 超出范围 (num_envs={self.num_envs})")
-    #         return
-        
-    #     print(f"\n{'='*60}")
-    #     print(f"[debug_mems] Step={step}, Env={env_id}")
-    #     print(f"{'='*60}")
-        
-    #     for layer_id in range(self.num_layers):
-    #         mem = self.mems[env_id][layer_id]
-    #         mem_len = mem.size(1)
-            
-    #         if mem_len == 0:
-    #             print(f"  Layer {layer_id}: mem_len=0 (empty)")
-    #         else:
-    #             mem_mean = mem.mean().item()
-    #             mem_std = mem.std().item()
-    #             mem_norm = mem.norm().item()
-    #             mem_abs_max = mem.abs().max().item()
-                
-    #             print(f"  Layer {layer_id}: mem_len={mem_len:3d} | "
-    #                   f"mean={mem_mean:+.4f} | std={mem_std:.4f} | "
-    #                   f"norm={mem_norm:.4f} | abs_max={mem_abs_max:.4f}")
-        
-    #     # 打印所有环境的 mem 长度概览
-    #     all_mem_lens = [self.mems[i][0].size(1) for i in range(self.num_envs)]
-    #     print(f"  All envs mem_len: {all_mem_lens}")
-    #     print(f"{'='*60}\n")
-
     def act(
         self,
         obs_prop: torch.Tensor,  # [num_envs, proprio_dim]
         depth_image: torch.Tensor,  # [num_envs, H, W] or [num_envs, 1, H, W]
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         使用 TransformerXL 记忆机制计算动作。
         每步只输入 1 个 token (S=1)，复用 mems 中的历史信息。
-        
+
         Returns:
             actions: 形状为 [num_envs, action_dim] 的动作张量
+            yaw_pred: 形状为 [num_envs, 2] 的 yaw 预测张量（可选）
         """
         obs_prop = obs_prop.to(self.device)
         depth_image = depth_image.to(self.device)
@@ -330,11 +295,11 @@ class StudentOnlineRunner:
         for env_id in range(self.num_envs):
             self.prop_histories[env_id].append(obs_prop[env_id])
             self.depth_histories[env_id].append(depth_image[env_id])
-            
+
             # 拼接历史帧构建单个 token
             prop_stack = torch.cat(list(self.prop_histories[env_id]), dim=0)  # [prop_hist_len * proprio_dim]
             depth_stack = torch.stack(list(self.depth_histories[env_id]), dim=0)  # [depth_hist_len, H, W]
-            
+
             prop_tokens.append(prop_stack)
             depth_tokens.append(depth_stack)
 
@@ -344,87 +309,69 @@ class StudentOnlineRunner:
 
         with torch.no_grad():
             # 使用 forward_with_mems 进行带记忆的推理
-            actions, new_mems_batch = self._forward_with_mems(prop_batch, depth_batch)
+            actions, yaw_pred, new_mems_batch = self._forward_with_mems(prop_batch, depth_batch)
 
         # 更新每个环境的 mems
         for env_id in range(self.num_envs):
             for layer_id in range(self.num_layers):
                 self.mems[env_id][layer_id] = new_mems_batch[layer_id][env_id:env_id+1].detach()
 
-        # # Debug: 每 50 步打印一次 mems 状态
-        # self.step_count += 1
-        # if self.step_count % 50 == 0:
-        #     self.debug_print_mems(self.step_count, env_id=0)
-
-        return actions.squeeze(1)  # [B, action_dim]
+        yaw_out = yaw_pred.squeeze(1) if yaw_pred is not None else None
+        return actions.squeeze(1), yaw_out  # [B, action_dim], [B, 2]
 
     def _forward_with_mems(
         self,
         proprio_seq: torch.Tensor,  # [B, 1, prop_feat_dim]
         depth_seq: torch.Tensor,    # [B, 1, depth_hist_len, H, W]
-    ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], List[torch.Tensor]]:
         """
-        带记忆的前向传播，复用模型的各个组件。
-        
+        带记忆的前向传播，使用模型的 forward_step 方法。
+
         Returns:
             actions: [B, 1, action_dim]
+            yaw_pred: [B, 1, 2] 或 None
             new_mems: List[Tensor]，每层一个，形状为 [B, new_mem_len, d_model]
         """
         batch_size = proprio_seq.shape[0]
-        
-        # 1. 编码当前时间步的输入
-        prop_encoded = self.model.proprio_encoder(
-            proprio_seq.reshape(batch_size, -1)
-        )  # [B, 1, token_dim]
-        
-        depth_encoded = self.model.depth_encoder(
-            depth_seq.reshape(batch_size, depth_seq.size(2), depth_seq.size(3), depth_seq.size(4))
-        )  # [B, T, token_dim]
-        
-        # 2. 多模态融合
-        fused = self.model.fusion_transformer(prop_encoded, depth_encoded)
-        fused_token = fused["all_pooled"].unsqueeze(1)  # [B, 1, token_dim]
-        
-        # 3. 合并所有环境的 mems 为批次格式（处理不同长度的情况）
-        # 当某些环境 reset 后，其 mems 长度为 0，需要填充到最大长度
+
+        # 合并所有环境的 mems 为批次格式（处理不同长度的情况）
         batched_mems = []
         for layer_id in range(self.num_layers):
             env_mems = [self.mems[env_id][layer_id] for env_id in range(self.num_envs)]
             mem_lens = [m.size(1) for m in env_mems]
             max_mem_len = max(mem_lens) if mem_lens else 0
-            
+
             if max_mem_len == 0:
-                # 所有环境的 mems 都是空的
                 layer_mems = torch.zeros(
                     self.num_envs, 0, self.d_model, device=self.device
                 )
             else:
-                # 将所有 mems 左侧填充到相同长度
                 padded_mems = []
                 for m in env_mems:
                     current_len = m.size(1)
                     if current_len < max_mem_len:
-                        # 左侧填充零（保持时间对齐：最新的在右侧）
                         pad_len = max_mem_len - current_len
                         padding = torch.zeros(1, pad_len, self.d_model, device=self.device)
                         m = torch.cat([padding, m], dim=1)
                     padded_mems.append(m)
-                layer_mems = torch.cat(padded_mems, dim=0)  # [B, max_mem_len, d_model]
-            
+                layer_mems = torch.cat(padded_mems, dim=0)
+
             batched_mems.append(layer_mems)
-        
-        # 4. 使用 TransformerXL 进行时序建模
-        temporal_out, new_mems = self.model.temporal_model(
-            fused_token,
+
+        # 使用模型的 forward_step 方法（包含完整的 yaw 处理逻辑）
+        # proprio_seq: [B, 1, feat_dim] -> [B, feat_dim]
+        # depth_seq: [B, 1, depth_hist_len, H, W] -> [B, depth_hist_len, H, W]
+        actions, yaw_pred, new_mems = self.model.forward_step(
+            proprio_seq.squeeze(1),
+            depth_seq.squeeze(1),
             mems=batched_mems,
-            causal_mask=True,
-            return_mems=True,
-        )  # temporal_out: [B, 1, token_dim], new_mems: List[Tensor]
-        
-        # 5. 动作头输出
-        actions = self.model.action_head.forward_sequence(temporal_out)["mean"]  # [B, 1, action_dim]
-        
-        return actions, new_mems
+        )
+
+        # 恢复序列维度
+        actions = actions.unsqueeze(1)  # [B, 1, action_dim]
+        yaw_pred = yaw_pred.unsqueeze(1) if yaw_pred is not None else None  # [B, 1, 2]
+
+        return actions, yaw_pred, new_mems
 
 
 def parse_args_play() -> argparse.Namespace:
@@ -462,6 +409,21 @@ def parse_args_play() -> argparse.Namespace:
         help="Output path for recorded verification data (binary format).",
     )
 
+    # Camera mode selection
+    parser.add_argument(
+        "--camera_mode",
+        type=str,
+        choices=["dropout", "blackout"],
+        default="dropout",
+        help="Camera mode: 'dropout' (matches training, dynamic on/off) or 'blackout' (always off for testing).",
+    )
+    parser.add_argument(
+        "--camera_dropout_prob",
+        type=float,
+        default=0.3,
+        help="Camera dropout probability when using 'dropout' mode (should match training value).",
+    )
+
     cli_args.add_rsl_rl_args(parser)
     AppLauncher.add_app_launcher_args(parser)
     return parser.parse_args()
@@ -469,6 +431,11 @@ def parse_args_play() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args_play()
+
+    # Validate camera_dropout_prob range
+    if not 0.0 <= args.camera_dropout_prob <= 1.0:
+        raise ValueError(f"camera_dropout_prob must be between 0.0 and 1.0, got {args.camera_dropout_prob}")
+
     headless = getattr(args, "headless", False)
     disable_fabric = getattr(args, "disable_fabric", False)
     if not headless:
@@ -540,12 +507,27 @@ def main() -> None:
     )
     runner.reset()
 
-    # 初始化相机全黑管理器
-    blackout_manager = CameraBlackoutManager(
-        num_envs=vec_env.num_envs,
-        device=device,
-    )
-    print(f"[INFO] CameraBlackoutManager initialized: all {vec_env.num_envs} envs will have blackout camera.")
+    # 初始化相机管理器（根据命令行参数选择模式）
+    camera_manager = None
+    if args.camera_mode == "blackout":
+        # 全黑模式：测试模型在完全没有视觉的情况下的表现
+        camera_manager = CameraBlackoutManager(
+            num_envs=vec_env.num_envs,
+            device=device,
+        )
+        print(f"[INFO] Camera mode: BLACKOUT - all {vec_env.num_envs} envs will have blackout camera (100% offline).")
+    elif args.camera_mode == "dropout":
+        # Dropout模式：与训练对齐，动态切换在线/离线状态
+        camera_manager = CameraDropoutManager(
+            num_envs=vec_env.num_envs,
+            device=device,
+            dt=vec_env.unwrapped.step_dt,
+            prob_start_offline=args.camera_dropout_prob,
+        )
+        print(f"[INFO] Camera mode: DROPOUT - prob={args.camera_dropout_prob} (matches training distribution).")
+    else:
+        # Defensive check - should never reach here due to argparse choices validation
+        raise ValueError(f"Unknown camera_mode: {args.camera_mode}")
 
     # ========== 录制相关初始化 ==========
     record_data = getattr(args, "record_data", False)
@@ -570,8 +552,8 @@ def main() -> None:
         if depth_image is None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
 
-        # 应用相机全黑效果
-        depth_image = blackout_manager.update(depth_image)
+        # 应用相机管理器效果（dropout或blackout）
+        depth_image = camera_manager.update(depth_image)
         if step < 3:
             print(f"[DEBUG] depth_image stats: min={depth_image.min():.4f}, max={depth_image.max():.4f}, mean={depth_image.mean():.4f}")
         obs_prop = obs[:, :proprio_dim]
@@ -629,7 +611,11 @@ def main() -> None:
                 print(f"        Mems stats: min={pre_mems_0.min():.4f}, max={pre_mems_0.max():.4f}, mean={pre_mems_0.mean():.4f}")
                 print(f"        Zero ratio: {(pre_mems_0 == 0).sum() / pre_mems_0.size * 100:.1f}%")
 
-        student_action = runner.act(obs_prop, depth_image)
+        student_action, yaw_pred = runner.act(obs_prop, depth_image)
+
+        # Debug: 打印 yaw 预测
+        if step < DEBUG_STEPS and yaw_pred is not None:
+            print(f"  Yaw pred: {yaw_pred[0].cpu().numpy()}")
 
         # ========== 录制: 在推理后保存 env_id=0 的输入和输出 ==========
         if record_data:
@@ -685,7 +671,7 @@ def main() -> None:
         done_mask = dones.squeeze(-1).bool()
         if done_mask.any():
             runner.reset_done(done_mask)
-            blackout_manager.reset_env(done_mask)
+            camera_manager.reset_env(done_mask)
 
         obs = obs_next
         step += 1

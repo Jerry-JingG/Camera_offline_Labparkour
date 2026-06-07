@@ -316,6 +316,8 @@ def main():
 
         # Yaw buffer for loss calculation
         yaws_buffer = []
+        # True yaw buffer for training loss (extracted before masking)
+        true_yaws_buffer = []
 
         while batch is None:
             # --- prepare numpy obs for aggregator ---
@@ -329,6 +331,11 @@ def main():
                 teacher_actions = teacher_policy(obs, hist_encoding=args.teacher_hist_encoding)
             teacher_actions_cpu = teacher_actions.cpu()
             teacher_actions_np = teacher_actions_cpu.numpy()
+
+            # --- Store true yaw BEFORE masking for loss calculation ---
+            # This ensures we have ground truth yaw even though batch contains masked data
+            true_yaw_current = obs_prop_np[:, 6:8].copy()  # [B, 2]
+            true_yaws_buffer.append(true_yaw_current)
 
             # --- Mask privileged information for student ---
             # Teacher policy can see delta_yaw (indices 6-7) in obs_buf
@@ -454,8 +461,11 @@ def main():
                 txl_mems = new_mems
 
             # --- push to aggregator ---
+            # CRITICAL: Use masked proprio to match inference distribution
+            # During inference, student never sees true delta_yaw (indices 6:8)
+            # Training must use the same masked distribution
             batch = aggregator.push_step(
-                obs_prop=obs_prop_np,
+                obs_prop=obs_prop_np_masked,
                 depth_frame=depth_np,
                 teacher_actions=teacher_actions_np,
                 done=dones_np,
@@ -490,13 +500,10 @@ def main():
 
         loss_actions = nn.functional.mse_loss(pred, teacher_t)
 
-        # Calculate yaw loss
-        # Extract delta_yaw from batch proprio
-        # batch["proprio"] shape: [B, S, prop_hist_len * proprio_dim]
-        batch_size, seq_len, prop_feat_dim = batch["proprio"].shape
-        proprio_reshaped = batch["proprio"].reshape(batch_size, seq_len, args.prop_hist_len, num_prop)
-        proprio_last_frame = proprio_reshaped[:, :, -1, :]  # [B, S, num_prop]
-        true_yaw_train = torch.from_numpy(proprio_last_frame[:, :, 6:8]).float().to(device)  # [B, S, 2]
+        # Calculate yaw loss using true yaw values stored before masking
+        # true_yaws_buffer contains [B, 2] arrays for each step in the sequence
+        # Stack them to get [B, S, 2] shape matching yaw_pred
+        true_yaw_train = torch.from_numpy(np.stack(true_yaws_buffer, axis=1)).float().to(device)  # [B, S, 2]
 
         # Note: yaw_pred is the unscaled prediction from the model
         # The model internally scales by 1.5 for proprio replacement, but returns unscaled
