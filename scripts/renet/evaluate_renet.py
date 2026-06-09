@@ -73,11 +73,6 @@ def parse_args_eval() -> argparse.Namespace:
     parser.add_argument("--hidden_dim", type=int, default=None, help="Override GRU hidden dimension.")
     parser.add_argument("--embed_dim", type=int, default=None, help="Override branch embedding dimension.")
     parser.add_argument("--use_dropout", action="store_true", default=False, help="Simulate camera dropout.")
-    parser.add_argument("--prob_start_offline", type=float, default=0.0, help="Initial dropout probability.")
-    parser.add_argument("--online_duration_min", type=float, default=5.0, help="Minimum online duration in seconds.")
-    parser.add_argument("--online_duration_max", type=float, default=5.0, help="Maximum online duration in seconds.")
-    parser.add_argument("--offline_duration_min", type=float, default=2.0, help="Minimum offline duration in seconds.")
-    parser.add_argument("--offline_duration_max", type=float, default=2.0, help="Maximum offline duration in seconds.")
 
     cli_args.add_rsl_rl_args(parser)
     AppLauncher.add_app_launcher_args(parser)
@@ -265,10 +260,10 @@ def main() -> None:  # noqa: C901
             num_envs=vec_env.num_envs,
             device=device,
             dt=float(vec_env.unwrapped.step_dt),
-            prob_start_offline=args.prob_start_offline,
+            prob_start_offline=0.0,
             prob_cam_offline=1.0,
-            online_duration_range=(args.online_duration_min, args.online_duration_max),
-            offline_duration_range=(args.offline_duration_min, args.offline_duration_max),
+            online_duration_range=(5.0, 5.0),
+            offline_duration_range=(5.0, 5.0),
         )
         print("[Eval] Camera dropout simulation: ENABLED")
     else:

@@ -112,6 +112,7 @@ class UnitreeGo2StudentParkourEnvCfg_PLAY(UnitreeGo2StudentParkourEnvCfg_EVAL):
 
         self.scene.num_envs = 16
         self.episode_length_s = 60.
+        self.parkours.base_parkour.debug_vis = True
 
         if self.scene.terrain.terrain_generator is not None:
             self.scene.terrain.terrain_generator.num_rows = 5

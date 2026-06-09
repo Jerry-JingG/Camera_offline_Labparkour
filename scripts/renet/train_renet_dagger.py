@@ -59,13 +59,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--grad_clip", type=float, default=1.0)
 
-    parser.add_argument("--disable_dropout", action="store_true")
-    parser.add_argument("--prob_start_offline", type=float, default=0.0)
-    parser.add_argument("--online_duration_min", type=float, default=2.0)
-    parser.add_argument("--online_duration_max", type=float, default=10.0)
-    parser.add_argument("--offline_duration_min", type=float, default=1.0)
-    parser.add_argument("--offline_duration_max", type=float, default=5.0)
-
     parser.add_argument("--save_dir", type=str, default="outputs/renet/dagger")
     parser.add_argument("--save_interval", type=int, default=50000)
     parser.add_argument("--log_interval", type=int, default=1000)
@@ -141,8 +134,7 @@ def checkpoint_meta(
         "hidden_dim": args.hidden_dim,
         "embed_dim": args.embed_dim,
         "uses_delta_yaw_input": True,
-        "oracle_switch": not args.disable_dropout,
-        "prob_cam_offline": 1.0 if not args.disable_dropout else 0.0,
+        "prob_cam_offline": 1.0,
     }
 
 
@@ -209,21 +201,16 @@ def main() -> None:  # noqa: C901
     )
     runner.reset()
 
-    dropout_manager: Optional[CameraDropoutManager]
-    if args.disable_dropout:
-        dropout_manager = None
-        print("[Info] Camera dropout disabled. VP branch is always selected.")
-    else:
-        dropout_manager = CameraDropoutManager(
+    dropout_manager = CameraDropoutManager(
             num_envs=args.num_envs,
             device=device,
             dt=float(vec_env.unwrapped.step_dt),
-            prob_start_offline=args.prob_start_offline,
+            prob_start_offline=0.0,
             prob_cam_offline=1.0,
-            online_duration_range=(args.online_duration_min, args.online_duration_max),
-            offline_duration_range=(args.offline_duration_min, args.offline_duration_max),
+            online_duration_range=(3.0, 15.0),
+            offline_duration_range=(0.0, 5.0),
         )
-        print("[Info] Camera dropout enabled with oracle OP/VP switching.")
+    print("[Info] Camera dropout enabled with oracle OP/VP switching.")
 
     ep_returns = deque(maxlen=100)
     ep_lengths = deque(maxlen=100)
