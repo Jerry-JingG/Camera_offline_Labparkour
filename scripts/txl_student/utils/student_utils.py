@@ -350,6 +350,7 @@ class SequenceAggregator:
         self.seq_action = None
         self.seq_done = torch.zeros((num_envs, sequence_len), dtype=torch.bool, device=self.device)
         self.seq_info = torch.zeros((num_envs, sequence_len, extra_info_dim), dtype=torch.float32, device=self.device)
+        self.seq_valid = torch.ones((num_envs, sequence_len), dtype=torch.bool, device=self.device)
 
         self.current_seq_step = 0
 
@@ -362,13 +363,27 @@ class SequenceAggregator:
         self.seq_action = None
         self.seq_done.zero_()
         self.seq_info.zero_()
+        self.seq_valid.fill_(True)
 
         self.current_seq_step = 0
 
-    def push_step(self, obs_prop: torch.Tensor, depth_frame: torch.Tensor, teacher_actions: torch.Tensor, done: torch.Tensor, extra_info: torch.Tensor):
+    def push_step(
+        self,
+        obs_prop: torch.Tensor,
+        depth_frame: torch.Tensor,
+        teacher_actions: torch.Tensor,
+        done: torch.Tensor,
+        extra_info: torch.Tensor,
+        valid_mask: Optional[torch.Tensor] = None,
+    ):
         """
         接收 Tensor 数据（需保证已在正确的 device 上），更新历史 buffer 和 sequence buffer。
         """
+        if valid_mask is None:
+            valid_mask = torch.ones((self.num_envs,), dtype=torch.bool, device=self.device)
+        else:
+            valid_mask = valid_mask.to(device=self.device, dtype=torch.bool)
+
         # --- 1. 更新历史 (整体左移) ---
         self.prop_hist = torch.roll(self.prop_hist, -1, dims=1)
         self.depth_hist = torch.roll(self.depth_hist, -1, dims=1)
@@ -393,6 +408,7 @@ class SequenceAggregator:
         self.seq_action[:, idx] = teacher_actions
         self.seq_done[:, idx] = done
         self.seq_info[:, idx] = extra_info
+        self.seq_valid[:, idx] = valid_mask
 
         # --- 3. 处理 Done (批量清零) ---
         if done.any():
@@ -416,5 +432,33 @@ class SequenceAggregator:
             "depth": self.seq_depth.clone(),
             "actions": self.seq_action.clone(),
             "dones": self.seq_done.clone(),
-            "extra_infos": self.seq_info.clone()
+            "extra_infos": self.seq_info.clone(),
+            "valid_mask": self.seq_valid.clone(),
         }
+
+
+class ResetSettleManager:
+    """Tracks reset settling as TXL-only pseudo episodes."""
+
+    def __init__(self, num_envs: int, settle_steps: int, device: torch.device) -> None:
+        self.settle_steps = max(int(settle_steps), 0)
+        self.remaining = torch.full(
+            (num_envs,),
+            self.settle_steps,
+            dtype=torch.long,
+            device=device,
+        )
+        self.prev_txl_done = self.remaining > 0
+
+    def active_mask(self) -> torch.Tensor:
+        return self.remaining > 0
+
+    def step(self, dones_bool: torch.Tensor, txl_done: torch.Tensor) -> None:
+        settling = self.active_mask()
+        if settling.any():
+            self.remaining[settling] = torch.clamp(self.remaining[settling] - 1, min=0)
+
+        if dones_bool.any():
+            self.remaining[dones_bool] = self.settle_steps
+
+        self.prev_txl_done = txl_done.detach().clone()

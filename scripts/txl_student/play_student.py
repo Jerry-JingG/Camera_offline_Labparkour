@@ -39,7 +39,8 @@ import cli_args  # isort: skip
 from utils.student_utils import (
     find_latest_student_checkpoint,
     load_student_policy_for_play,
-    StudentOnlineRunner
+    StudentOnlineRunner,
+    ResetSettleManager,
 )
 
 
@@ -58,6 +59,12 @@ def parse_args_play() -> argparse.Namespace:
     parser.add_argument("--depth_hist_len", type=int, default=1, help="History length for depth tokens.")
     parser.add_argument("--mem_len", type=int, default=64, help="TransformerXL memory length (S).")
     parser.add_argument("--max_steps", type=int, default=2000, help="Maximum steps to run.")
+    parser.add_argument(
+        "--reset_settle_steps",
+        type=int,
+        default=50,
+        help="Zero-action settling steps after reset; these steps are treated as TXL pseudo-episodes.",
+    )
     parser.add_argument("--use_dropout", action="store_true", default=False, help="Simulate camera dropout.")
 
     cli_args.add_rsl_rl_args(parser)
@@ -154,12 +161,17 @@ def main() -> None:
 
     obs, extras = vec_env.get_observations()
     dones_bool = torch.zeros(vec_env.num_envs, device=device, dtype=torch.bool)
+    settle_manager = ResetSettleManager(vec_env.num_envs, args.reset_settle_steps, device)
+    if args.reset_settle_steps > 0:
+        settle_s = args.reset_settle_steps * float(vec_env.unwrapped.step_dt)
+        print(f"[Play] Reset settle enabled: {args.reset_settle_steps} steps (~{settle_s:.2f}s)")
     step = 0
     import cv2
     from isaaclab.utils.math  import euler_xyz_from_quat, wrap_to_pi
     base_parkour = vec_env.unwrapped.parkour_manager.get_term("base_parkour")
 
     while simulation_app.is_running() and step < args.max_steps:
+        settle_mask = settle_manager.active_mask()
         depth_image = extras["observations"].get("depth_camera")
         if depth_image is None:
             raise RuntimeError("当前任务未输出 depth_camera 观测，请确认使用 TeacherCam 任务。")
@@ -190,21 +202,36 @@ def main() -> None:
             cv2.imshow("Collect Debug (Depth)", grid_img)
             cv2.waitKey(1)
 
-        student_action = runner.act(obs_prop, depth_image, prev_done=dones_bool)
+        student_action = runner.act(
+            obs_prop,
+            depth_image,
+            prev_done=settle_manager.prev_txl_done,
+        )
+        actions_to_env = student_action.clone()
+        if settle_mask.any():
+            actions_to_env[settle_mask] = 0.0
 
         if step % 50 == 0:
             try:
                 mean_norm = student_action.norm(dim=-1).mean().item()
+                env_norm = actions_to_env.norm(dim=-1).mean().item()
             except Exception:
                 mean_norm = float("nan")
-            print(f"[student_play] step={step} mean_action_norm={mean_norm:.6f}")
+                env_norm = float("nan")
+            settle_count = int(settle_mask.sum().item())
+            print(
+                f"[student_play] step={step} settle={settle_count}/{vec_env.num_envs} "
+                f"student_action_norm={mean_norm:.6f} env_action_norm={env_norm:.6f}"
+            )
 
-        obs_next, rews, dones, extras = vec_env.step(student_action)
+        obs_next, rews, dones, extras = vec_env.step(actions_to_env)
         dones_bool = dones.squeeze(-1).bool()
+        txl_dones = dones_bool | settle_mask
 
-        # Vectorized reset for done envs
-        if dones_bool.any():
-            runner.reset_done(dones_bool)
+        # Clear short histories on both real env done and reset-settle pseudo-boundaries.
+        if txl_dones.any():
+            runner.reset_done(txl_dones)
+        settle_manager.step(dones_bool, txl_dones)
 
         obs = obs_next
         step += 1

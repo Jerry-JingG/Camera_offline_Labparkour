@@ -41,6 +41,7 @@ from transformerxl.temporal.txl import TransformerXLTemporal
 from utils.student_utils import (
     SequenceAggregator,
     StudentOnlineRunner,
+    ResetSettleManager,
     build_student_model,
     load_env_and_teacher
 )
@@ -67,6 +68,12 @@ def parse_args():
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--grad_clip", type=float, default=1.0)
+    parser.add_argument(
+        "--reset_settle_steps",
+        type=int,
+        default=50,
+        help="Zero-action settling steps after reset; these steps are treated as invalid TXL pseudo-episodes.",
+    )
 
     # Augmentation
     parser.add_argument("--use_dropout", action="store_true", help="Enable camera dropout during collection")
@@ -200,6 +207,10 @@ def main():
     current_returns = torch.zeros(args.num_envs, device=device)
     current_lengths = torch.zeros(args.num_envs, device=device)
     dones_bool = torch.zeros(args.num_envs, dtype=torch.bool, device=device)  # Track prev dones
+    settle_manager = ResetSettleManager(args.num_envs, args.reset_settle_steps, device)
+    if args.reset_settle_steps > 0:
+        settle_s = args.reset_settle_steps * float(vec_env.unwrapped.step_dt)
+        print(f"[Info] Reset settle enabled: {args.reset_settle_steps} steps (~{settle_s:.2f}s)")
 
     base_parkour = vec_env.unwrapped.parkour_manager.get_term("base_parkour")
     num_goals = int(getattr(base_parkour, "num_goals", 0))
@@ -213,6 +224,9 @@ def main():
         """ Collection Phase (Run until we have a full sequence batch) """
         batch_data = None
         while batch_data is None and simulation_app.is_running():
+            settle_mask = settle_manager.active_mask()
+            valid_mask = ~settle_mask
+
             # A. Get Raw Observation
             depth_image = extras["observations"]["depth_camera"]  # [N, 1, H, W] or [N, H, W]
             if depth_image.dim() == 4:
@@ -239,7 +253,11 @@ def main():
                 dropout_manager.update(depth_image=student_depth, obs_prop=student_prop)
 
             # D. Student Action (Learner) - Uses AUGMENTED observations
-            student_actions = student_runner.act(student_prop, student_depth, prev_done=dones_bool)
+            student_actions = student_runner.act(
+                student_prop,
+                student_depth,
+                prev_done=settle_manager.prev_txl_done,
+            )
 
             goal_idx_before_step = None
             if base_parkour is not None and num_goals > 0:
@@ -247,9 +265,9 @@ def main():
 
             # E. Action Selection (Mixture)
             if it < args.num_pretrain_iters:
-                actions_to_env = teacher_actions
+                selected_actions = teacher_actions
             else:
-                actions_to_env = student_actions
+                selected_actions = student_actions
                 if args.teacher_mixture:
                     # Decay beta
                     progress = max(it - args.num_pretrain_iters, 0)
@@ -258,30 +276,40 @@ def main():
 
                     # Sample mask
                     mask = torch.rand(args.num_envs, device=device) < beta
-                    actions_to_env = torch.where(mask.unsqueeze(-1), teacher_actions, student_actions)
+                    selected_actions = torch.where(mask.unsqueeze(-1), teacher_actions, student_actions)
+
+            actions_to_env = selected_actions.clone()
+            if settle_mask.any():
+                actions_to_env[settle_mask] = 0.0
 
             # F. Step Environment
             obs, rewards, dones, extras = vec_env.step(actions_to_env)
             dones_bool = dones.squeeze(-1).bool()  # [N]
+            txl_dones = dones_bool | settle_mask
 
             # G. Store in Aggregator
             batch_data = aggregator.push_step(
                 obs_prop=student_prop,
                 depth_frame=student_depth,
                 teacher_actions=teacher_actions,
-                done=dones_bool,  # {obs[t], act[t], dones[t]}
-                extra_info=extra_info
+                done=txl_dones,  # TXL pseudo-episode boundary for reset settle.
+                extra_info=extra_info,
+                valid_mask=valid_mask,
             )
 
-            # H. Handle Resets for Inference Runner
-            if dones_bool.any():
-                student_runner.reset_done(dones_bool)
+            # H. Handle resets and stats. TXL done also clears short token histories;
+            # the temporal mem itself stays masked by txl_dones/full_dones.
+            if txl_dones.any():
+                student_runner.reset_done(txl_dones)
 
-                # Update stats
-                current_returns += rewards.squeeze(-1)
-                current_lengths += 1
+            rewards_f = rewards.squeeze(-1)
+            if valid_mask.any():
+                current_returns[valid_mask] += rewards_f[valid_mask]
+                current_lengths[valid_mask] += 1
 
-                done_indices = torch.nonzero(dones_bool).squeeze(-1)
+            active_dones = dones_bool & valid_mask
+            if active_dones.any():
+                done_indices = torch.nonzero(active_dones).squeeze(-1)
                 for idx in done_indices:
                     ep_returns.append(current_returns[idx].item())
                     ep_lengths.append(current_lengths[idx].item())
@@ -295,9 +323,8 @@ def main():
 
                     current_returns[idx] = 0.0
                     current_lengths[idx] = 0.0
-            else:
-                current_returns += rewards.squeeze(-1)
-                current_lengths += 1
+
+            settle_manager.step(dones_bool, txl_dones)
 
         """batch sequence data assembled, train on batch data"""
         student_model.train()
@@ -308,6 +335,7 @@ def main():
         b_actions = batch_data["actions"].to(device)
         b_dones = batch_data["dones"].to(device)
         true_yaws = batch_data["extra_infos"].to(device)
+        b_valid = batch_data["valid_mask"].to(device).float()
 
         full_dones = torch.cat([mem_dones, b_dones], dim=1) if mem_dones is not None else b_dones.clone()
 
@@ -315,8 +343,11 @@ def main():
         pred_actions, pred_yaws, new_train_mems = student_model.forward_with_mems(
             b_prop, b_depth, mems=train_mems, full_dones=full_dones
         )
-        action_loss = nn.functional.mse_loss(pred_actions, b_actions)
-        yaw_loss = nn.functional.mse_loss(pred_yaws, true_yaws)
+        valid_count = b_valid.sum().clamp_min(1.0)
+        action_loss_per_step = torch.mean((pred_actions - b_actions) ** 2, dim=-1)
+        yaw_loss_per_step = torch.mean((pred_yaws - true_yaws) ** 2, dim=-1)
+        action_loss = (action_loss_per_step * b_valid).sum() / valid_count
+        yaw_loss = (yaw_loss_per_step * b_valid).sum() / valid_count
         loss = action_loss + yaw_loss
 
         optimizer.zero_grad()
@@ -338,10 +369,12 @@ def main():
         dt = time.time() - iter_start
         if (it + 1) % 10 == 0:
             with torch.no_grad():
-                diff_rmse = torch.sqrt(torch.mean((pred_actions - b_actions) ** 2)).item()
-                teacher_rms = torch.sqrt(torch.mean(b_actions ** 2)).item()
+                diff_rmse = torch.sqrt((action_loss_per_step * b_valid).sum() / valid_count).item()
+                teacher_rms_per_step = torch.mean(b_actions ** 2, dim=-1)
+                teacher_rms = torch.sqrt((teacher_rms_per_step * b_valid).sum() / valid_count).item()
+                valid_ratio = b_valid.mean().item()
 
-            print(f"[Iter {it+1}] Action Loss: {action_loss.item():.5f} | Yaw Loss: {yaw_loss.item():.5f} | Time: {dt:.2f}s | RMSE: {diff_rmse:.4f}")
+            print(f"[Iter {it+1}] Action Loss: {action_loss.item():.5f} | Yaw Loss: {yaw_loss.item():.5f} | Time: {dt:.2f}s | RMSE: {diff_rmse:.4f} | Valid: {valid_ratio:.3f}")
 
             if args.wandb and WANDB_AVAILABLE:
                 log_data = {
@@ -349,6 +382,7 @@ def main():
                     "dagger/yaw_loss": yaw_loss.item(),
                     "dagger/diff_rmse": diff_rmse,
                     "dagger/teacher_rms": teacher_rms,
+                    "dagger/valid_ratio": valid_ratio,
                     "dagger/iter_time": dt,
                     "rollout/ep_return_mean": np.mean(ep_returns) if ep_returns else 0.0,
                     "rollout/ep_len_mean": np.mean(ep_lengths) if ep_lengths else 0.0,
@@ -386,7 +420,8 @@ def main():
                     "task": args.task,
                     "num_prop": proprio_dim,
                     "action_dim": action_dim,
-                    "camera_resolution": camera_resolution
+                    "camera_resolution": camera_resolution,
+                    "reset_settle_steps": args.reset_settle_steps,
                 }
             }, ckpt_path)
             print(f"Saved checkpoint to {ckpt_path}")

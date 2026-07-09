@@ -29,6 +29,12 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--reset_settle_steps",
+    type=int,
+    default=50,
+    help="Zero-action settling steps after reset before applying policy actions.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -46,6 +52,7 @@ simulation_app = app_launcher.app
 
 import gymnasium as gym
 import os
+import sys
 import time
 import torch
 
@@ -67,6 +74,13 @@ from vecenv_wrapper import ParkourRslRlVecEnvWrapper
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+TXL_STUDENT_DIR = os.path.join(PROJECT_ROOT, "scripts", "txl_student")
+if TXL_STUDENT_DIR not in sys.path:
+    sys.path.insert(0, TXL_STUDENT_DIR)
+
+from utils.student_utils import ResetSettleManager
 
 
 
@@ -161,10 +175,16 @@ def main():
     num_priv_explicit = estimator_paras["num_priv_explicit"]
     # reset environment
     obs, extras = env.get_observations()
+    dones_bool = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    settle_manager = ResetSettleManager(env.num_envs, args_cli.reset_settle_steps, env.device)
+    if args_cli.reset_settle_steps > 0:
+        settle_s = args_cli.reset_settle_steps * float(env.unwrapped.step_dt)
+        print(f"[teacher_play] Reset settle enabled: {args_cli.reset_settle_steps} steps (~{settle_s:.2f}s)")
     timestep = 0
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
+        settle_mask = settle_manager.active_mask()
         # run everything in inference mode
         if agent_cfg.algorithm.class_name != "DistillationWithExtractor":
             with torch.inference_mode():
@@ -184,12 +204,31 @@ def main():
                 obs[:, 6:8] = 1.5*yaw
                 # obs[:, num_prop+num_scan:num_prop+num_scan+num_priv_explicit] = estimator.inference(obs[:, :num_prop])
                 actions = policy(obs, hist_encoding=True, scandots_latent=depth_latent)
-        obs, _, _, extras = env.step(actions)
-        if args_cli.video:
-            timestep += 1
-            # Exit the play loop after recording one video
-            if timestep == args_cli.video_length:
-                break
+
+        actions_to_env = actions.clone()
+        if settle_mask.any():
+            actions_to_env[settle_mask] = 0.0
+
+        if timestep % 50 == 0:
+            try:
+                policy_norm = actions.norm(dim=-1).mean().item()
+                env_norm = actions_to_env.norm(dim=-1).mean().item()
+            except Exception:
+                policy_norm = float("nan")
+                env_norm = float("nan")
+            settle_count = int(settle_mask.sum().item())
+            print(
+                f"[teacher_play] step={timestep} settle={settle_count}/{env.num_envs} "
+                f"policy_action_norm={policy_norm:.6f} env_action_norm={env_norm:.6f}"
+            )
+
+        obs, _, dones, extras = env.step(actions_to_env)
+        dones_bool = dones.squeeze(-1).bool()
+        settle_manager.step(dones_bool, dones_bool | settle_mask)
+
+        timestep += 1
+        if args_cli.video and timestep == args_cli.video_length:
+            break
 
         # time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)
