@@ -20,6 +20,7 @@ from collections import deque
 import numpy as np
 import torch
 from torch import nn, Tensor
+import torch.nn.functional as F
 from typing import Dict, List, Tuple, Optional
 
 # Ensure project-local packages (parkour_isaaclab, parkour_tasks, etc.) are importable
@@ -46,6 +47,56 @@ from utils.student_utils import (
     load_env_and_teacher
 )
 
+DEPTH_CROP_LEFT_COLS = 10
+
+
+def _left_crop_resize_depth(depth_image: Tensor, left_cols: int = DEPTH_CROP_LEFT_COLS) -> Tensor:
+    """Crop the left camera columns and resize back to the policy resolution."""
+    if left_cols <= 0:
+        return depth_image
+
+    if depth_image.dim() == 3:
+        depth_4d = depth_image.unsqueeze(1)
+        squeeze_channel = True
+    elif depth_image.dim() == 4 and depth_image.shape[1] == 1:
+        depth_4d = depth_image
+        squeeze_channel = False
+    else:
+        raise ValueError(
+            "depth_image must have shape [N,H,W] or [N,1,H,W], "
+            f"got {tuple(depth_image.shape)}"
+        )
+
+    height, width = depth_4d.shape[-2:]
+    if left_cols >= width:
+        raise ValueError(f"left_cols={left_cols} must be smaller than image width={width}")
+
+    cropped = depth_4d[..., :, left_cols:]
+    resized = F.interpolate(
+        cropped,
+        size=(height, width),
+        mode="bicubic",
+        align_corners=False,
+        antialias=True,
+    )
+    resized = torch.clamp(resized, min=-0.5, max=0.5)
+    return resized.squeeze(1) if squeeze_channel else resized
+
+
+def _enable_encoder_only_training(model: MultiModalStudentPolicy) -> List[Tensor]:
+    model.requires_grad_(False)
+    model.proprio_encoder.requires_grad_(True)
+    model.depth_encoder.requires_grad_(True)
+    return [parameter for parameter in model.parameters() if parameter.requires_grad]
+
+
+def _set_encoder_only_train_mode(model: MultiModalStudentPolicy) -> None:
+    model.train()
+    model.fusion_transformer.eval()
+    model.temporal_model.eval()
+    model.action_head.eval()
+    model.yaw_head.eval()
+
 
 def parse_args():
     parser = argparse.ArgumentParser("Train Student via DAgger")
@@ -65,13 +116,18 @@ def parse_args():
     parser.add_argument("--sequence_length", type=int, default=64)
     parser.add_argument("--prop_hist_len", type=int, default=1)
     parser.add_argument("--depth_hist_len", type=int, default=1)
+    parser.add_argument(
+        "--encoder_only_training",
+        action="store_true",
+        help="Freeze fusion/temporal/action heads and train only proprio/depth encoders.",
+    )
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument(
         "--reset_settle_steps",
         type=int,
-        default=50,
+        default=25,
         help="Zero-action settling steps after reset; these steps are treated as invalid TXL pseudo-episodes.",
     )
 
@@ -140,8 +196,26 @@ def main():
         mem_len=args.sequence_length,
         token_dim=128
     ).to(device)
+    if args.encoder_only_training:
+        trainable_parameters = _enable_encoder_only_training(student_model)
+        train_mode_name = "encoder_only"
+        trainable_modules = ["proprio_encoder", "depth_encoder"]
+        print("[Info] Encoder-only training enabled: proprio_encoder + depth_encoder")
+    else:
+        trainable_parameters = [parameter for parameter in student_model.parameters() if parameter.requires_grad]
+        train_mode_name = "full"
+        trainable_modules = [
+            "proprio_encoder",
+            "depth_encoder",
+            "fusion_transformer",
+            "temporal_model",
+            "action_head",
+            "yaw_head",
+        ]
+        print("[Info] Encoder-only training disabled: full student training")
     optimizer = torch.optim.AdamW(student_model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_iters, eta_min=1e-4)
+    print(f"[Info] Fixed student depth crop enabled: left={DEPTH_CROP_LEFT_COLS} cols, resize back to {camera_resolution}")
 
     # Load checkpoint if provided
     start_iter = 0
@@ -246,7 +320,7 @@ def main():
             extra_info = torch.cat([base_parkour.target_yaw.clone().unsqueeze(-1), base_parkour.next_target_yaw.clone().unsqueeze(-1)], dim=-1)
 
             # student_prop[:, 12] = dones_bool.float()
-            student_depth = depth_image.clone()
+            student_depth = _left_crop_resize_depth(depth_image.clone())
 
             if dropout_manager:
                 dropout_manager.reset_env(dones_bool)
@@ -327,7 +401,10 @@ def main():
             settle_manager.step(dones_bool, txl_dones)
 
         """batch sequence data assembled, train on batch data"""
-        student_model.train()
+        if args.encoder_only_training:
+            _set_encoder_only_train_mode(student_model)
+        else:
+            student_model.train()
 
         # Prepare Batch, Shape: [B, S, ...]
         b_prop = batch_data["proprio"].to(device)
@@ -353,7 +430,7 @@ def main():
         optimizer.zero_grad()
         loss.backward()
         if args.grad_clip > 0:
-            nn.utils.clip_grad_norm_(student_model.parameters(), args.grad_clip)
+            nn.utils.clip_grad_norm_(trainable_parameters, args.grad_clip)
         optimizer.step()
         #scheduler.step()
 
@@ -422,6 +499,11 @@ def main():
                     "action_dim": action_dim,
                     "camera_resolution": camera_resolution,
                     "reset_settle_steps": args.reset_settle_steps,
+                    "depth_crop_left_cols": DEPTH_CROP_LEFT_COLS,
+                    "depth_crop_mode": "fixed_left_crop_resize",
+                    "encoder_only_training": args.encoder_only_training,
+                    "train_mode": train_mode_name,
+                    "trainable_modules": trainable_modules,
                 }
             }, ckpt_path)
             print(f"Saved checkpoint to {ckpt_path}")

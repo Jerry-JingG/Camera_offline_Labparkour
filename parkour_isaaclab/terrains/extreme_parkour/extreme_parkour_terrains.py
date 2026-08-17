@@ -94,7 +94,18 @@ def parkour_gap_terrain(
         dis_x = platform_len
         last_dis_x = dis_x
         for i in range(num_goals - 2):
-            rand_x = np.random.randint(dis_x_min, dis_x_max)
+            if i == 0 and cfg.first_gap_edge_x is not None:
+                first_gap_edge = round(cfg.first_gap_edge_x / cfg.horizontal_scale)
+                rand_x = int(first_gap_edge - platform_len + gap_size // 2)
+                full_gap_stop = platform_len + rand_x + gap_size // 2
+                if first_gap_edge <= platform_len or full_gap_stop > width_pixels:
+                    raise ValueError(
+                        "first_gap_edge_x places the first gap outside the valid gap terrain range: "
+                        f"first_gap_edge_x={cfg.first_gap_edge_x}, platform_len={cfg.platform_len}, "
+                        f"terrain_length={cfg.size[0]}"
+                    )
+            else:
+                rand_x = np.random.randint(dis_x_min, dis_x_max)
             dis_x += rand_x
             rand_y = np.random.randint(dis_y_min, dis_y_max) if dis_y_min < dis_y_max else dis_y_min
             if not cfg.apply_flat:

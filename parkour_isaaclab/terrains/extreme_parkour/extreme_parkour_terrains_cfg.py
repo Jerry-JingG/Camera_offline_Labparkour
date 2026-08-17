@@ -20,6 +20,7 @@ class ExtremeParkourGapTerrainCfg(ExtremeParkourRoughTerrainCfg):
     function = extreme_parkour_terrains.parkour_gap_terrain
     gap_size: str = '0.1 + 0.7*difficulty'
     gap_depth: tuple[float, float] = (0.2, 1) 
+    first_gap_edge_x: float | None = None
 
 @configclass
 class ExtremeParkourHurdleTerrainCfg(ExtremeParkourRoughTerrainCfg):

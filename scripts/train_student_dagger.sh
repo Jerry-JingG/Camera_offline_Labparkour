@@ -10,25 +10,26 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ------------------------------- 核心训练参数 ---------------------------------
 TASK_ID="Isaac-Extreme-Parkour-TeacherCam-Unitree-Go2-Collect-v0"  # --task
-NUM_ENVS=512                                                 # --num_envs：并行环境数量
-NUM_ITERS=50000                                              # --num_iters：DAGGER 总迭代次数
-NUM_PRETRAIN_ITERS=1000                                      # --num_pretrain_iters：预热迭代，前若干迭代由 Teacher 全程驾驶
+NUM_ENVS=64                                                 # --num_envs：并行环境数量
+NUM_ITERS=80000                                              # --num_iters：DAGGER 总迭代次数
+NUM_PRETRAIN_ITERS=0                                      # --num_pretrain_iters：预热迭代，前若干迭代由 Teacher 全程驾驶
 
 SEQUENCE_LENGTH=128                                          # --sequence_length：TXL 序列长度 / mem_len
 PROP_HIST_LEN=1                                             # --prop_hist_len：ProprioEncoder 的历史步数
 DEPTH_HIST_LEN=1                                            # --depth_hist_len：DepthEncoder 的帧堆叠数
 
 TEACHER_CHECKPOINT="logs/rsl_rl/unitree_go2_parkour/260428/model_49999.pt"    # 教师 PPO 权重路径
-STUDENT_CHECKPOINT=""                                           # 可选：已有学生模型 checkpoint
-SAVE_DIR="outputs/students/train_from_dagger/xl0505_pro"          # 输出目录
+STUDENT_CHECKPOINT="outputs/students/train_from_dagger/xl_pro_v2/student_dagger_49999.pt"                                           # 可选：已有学生模型 checkpoint
+SAVE_DIR="outputs/students/train_from_dagger/cam_crop_v2pro"          # 输出目录
 
 LEARNING_RATE=3e-4                                              # --learning_rate
 WEIGHT_DECAY=1e-4                                               # --weight_decay
 GRAD_CLIP=0.5                                                   # --grad_clip
+ENCODER_ONLY_TRAINING=false                                     # --encoder_only_training：仅训练 encoder
 
 # -------------------------- 教师-学生混合策略参数 -----------------------------
 # USE_MIXTURE=true 开启 mixture；false 关闭。beta 线性从 start 衰减到 end。
-USE_MIXTURE=true
+USE_MIXTURE=false
 BETA_START=0.8
 BETA_END=0.0
 BETA_DECAY_ITERS=6000
@@ -38,9 +39,9 @@ BETA_DECAY_ITERS=6000
 USE_DROPOUT=true
 
 # ------------------------------- 日志 / W&B 参数 -------------------------------
-USE_WANDB=true                                                 # --wandb：是否开启 W&B
+USE_WANDB=false                                                 # --wandb：是否开启 W&B
 WANDB_PROJECT="camera-offline-parkour"                          # --wandb_project
-WANDB_RUN_NAME="dagger-txl-0505-pro"                        # --wandb_run_name
+WANDB_RUN_NAME="dagger-txl-cam-crop"                        # --wandb_run_name
 
 # --------------------------- AppLauncher / Isaac 参数 -------------------------
 DEVICE_ARG="cuda:0"                                             # --device
@@ -87,6 +88,10 @@ fi
 # Dropout 参数
 if [[ "${USE_DROPOUT}" == true ]]; then
     DAGGER_CMD+=("--use_dropout")
+fi
+
+if [[ "${ENCODER_ONLY_TRAINING}" == true ]]; then
+    DAGGER_CMD+=("--encoder_only_training")
 fi
 
 # WandB 参数映射

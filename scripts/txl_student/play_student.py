@@ -19,6 +19,7 @@ import numpy as np
 import torch
 
 from isaaclab.app import AppLauncher
+from train_student_dagger import _left_crop_resize_depth
 
 # Ensure project roots are importable
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -181,6 +182,8 @@ def main() -> None:
         obs_prop[:, 6] = -current_yaw
         obs_prop[:, 7] = 0
         # obs_prop[:, 12] = dones_bool.float()
+
+        depth_image = _left_crop_resize_depth(depth_image.clone())
 
         if dropout_manager:
             dropout_manager.reset_env(dones_bool)

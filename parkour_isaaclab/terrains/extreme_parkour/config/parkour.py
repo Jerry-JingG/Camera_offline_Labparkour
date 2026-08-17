@@ -42,13 +42,13 @@ EXTREME_PARKOUR_TERRAINS_CFG = ParkourTerrainGeneratorCfg(
                         half_valid_width = (0.5, 1),
                         step_height = '0.1 + 0.35*difficulty'
                         ),
-        "parkour_beam": ExtremeParkourBeamTerrainCfg(
-                        proportion=0.2,
-                        apply_roughness=True,
-                        x_range = (1.2, 2.2),
-                        half_valid_width = (0.5, 0.8),
-                        beam_height_range = '0.4 - 0.05 * difficulty, 0.5 - 0.1 * difficulty' # Lowered height to force ducking
-                        ),
+        # "parkour_beam": ExtremeParkourBeamTerrainCfg(
+        #                 proportion=0.2,
+        #                 apply_roughness=True,
+        #                 x_range = (1.2, 2.2),
+        #                 half_valid_width = (0.5, 0.8),
+        #                 beam_height_range = '0.4 - 0.05 * difficulty, 0.5 - 0.1 * difficulty' # Lowered height to force ducking
+        #                 ),
         # "parkour": ExtremeParkourTerrainCfg(
         #                 proportion=0.0,
         #                 apply_roughness=True,
