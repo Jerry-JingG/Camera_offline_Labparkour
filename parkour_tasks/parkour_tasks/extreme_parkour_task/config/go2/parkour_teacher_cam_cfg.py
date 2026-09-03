@@ -88,7 +88,7 @@ class UnitreeGo2TeacherCamParkourEnvCfg_COLLECT(UnitreeGo2TeacherParkourEnvCfg):
             mode="startup",
             params={
                 'sensor_cfg': SceneEntityCfg("depth_camera"),
-                'rot_noise_range': {'pitch': (-1, 1)},
+                'rot_noise_range': {'pitch': (-5, 5)},
                 'convention': 'ros',
             },
         )

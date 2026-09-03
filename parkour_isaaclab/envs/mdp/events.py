@@ -171,29 +171,46 @@ def random_camera_position(
     """
     camera_sensor: RayCasterCamera = env.scene.sensors[sensor_cfg.name]
 
-    init_rot = torch.tensor(camera_sensor.cfg.offset.rot).repeat(env.num_envs,1).to(env.device)
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, dtype=torch.int64, device=env.device)
+    else:
+        env_ids = env_ids.to(device=env.device, dtype=torch.int64)
+    num_envs = env_ids.numel()
 
-    if pos_noise_range is not None: 
+    view_pos_w, view_quat_w = camera_sensor._compute_view_world_poses(env_ids)
+    init_pos = torch.tensor(camera_sensor.cfg.offset.pos, device=env.device).repeat(num_envs, 1)
+    init_rot = torch.tensor(camera_sensor.cfg.offset.rot, device=env.device).repeat(num_envs, 1)
+    offset_convention = getattr(camera_sensor.cfg.offset, "convention", convention)
+
+    random_pose = None
+    if pos_noise_range is not None:
         pos_range_list = [pos_noise_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z"]]
         pos_ranges = torch.tensor(pos_range_list, device=env.device)
-        random_pose = math_utils.sample_uniform(pos_ranges[:,0], pos_ranges[:,1], (env.num_envs,1), device=env.device)
-    else:
-        random_pose = None
+        pos_noise = math_utils.sample_uniform(pos_ranges[:, 0], pos_ranges[:, 1], (num_envs, 3), device=env.device)
+        random_pose = view_pos_w + math_utils.quat_apply(view_quat_w, init_pos + pos_noise)
+
+    random_rot = None
     if rot_noise_range is not None:
         rot_range_list = [rot_noise_range.get(key, (0.0, 0.0)) for key in ["roll", "pitch", "yaw"]]
-        rot_ranges = torch.deg2rad(torch.tensor(rot_range_list)).to(env.device)
-        roll, pitch, yaw = math_utils.euler_xyz_from_quat(init_rot)
-        init_rot = torch.stack([roll, pitch, yaw], dim=-1).to(env.device)
-        init_rot += math_utils.sample_uniform(rot_ranges[:,0], rot_ranges[:,1], (env.num_envs,1), device=env.device)
-        random_rot = math_utils.quat_from_euler_xyz(init_rot[:,0],init_rot[:,1],init_rot[:,2])
-    else:
-        random_rot = init_rot 
+        rot_ranges = torch.deg2rad(torch.tensor(rot_range_list, device=env.device))
+        # Apply the perturbation in world convention so roll/pitch/yaw stay intuitive.
+        init_rot_world = math_utils.convert_camera_frame_orientation_convention(
+            init_rot, origin=offset_convention, target="world"
+        )
+        roll, pitch, yaw = math_utils.euler_xyz_from_quat(init_rot_world)
+        init_rpy = torch.stack([roll, pitch, yaw], dim=-1)
+        rot_noise = math_utils.sample_uniform(rot_ranges[:, 0], rot_ranges[:, 1], (num_envs, 3), device=env.device)
+        random_rot = math_utils.quat_from_euler_xyz(
+            *(init_rpy + rot_noise).unbind(dim=-1)
+        )
+        random_rot = math_utils.quat_mul(view_quat_w, random_rot)
+        convention = "world"
 
     camera_sensor.set_world_poses(
         positions=random_pose,
         orientations=random_rot,
         convention=convention,
-        env_ids=torch.arange(env.num_envs, dtype=torch.int64, device=env.device),
+        env_ids=env_ids,
     )
     
 class randomize_rigid_body_material(ManagerTermBase):
